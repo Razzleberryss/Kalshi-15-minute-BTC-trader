@@ -35,3 +35,7 @@ BTC_SERIES_TICKER: str = os.getenv("BTC_SERIES_TICKER", "KXBTC15M")
 DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() == "true"
 POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
 MIN_EDGE: float = float(os.getenv("MIN_EDGE", "0.05"))
+MIN_EDGE_THRESHOLD: float = float(os.getenv("MIN_EDGE_THRESHOLD", "0.05"))
+
+# -- Logging ------------------------------------------------------------------
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
