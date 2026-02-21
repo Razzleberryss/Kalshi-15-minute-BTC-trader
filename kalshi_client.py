@@ -1,13 +1,14 @@
 """
 kalshi_client.py - Thin wrapper around the Kalshi REST API v2.
 Handles:
- - RSA-PSS request signing (required by Kalshi)
- - get_balance()
- - get_active_btc_market() -> finds the live 15-min BTC market
- - get_orderbook(ticker)
- - get_positions()
- - place_order(ticker, side, count, price_cents, dry_run)
- - cancel_order(order_id)
+  - RSA-PSS request signing (required by Kalshi)
+  - get_balance()
+  - get_active_btc_market() -> finds the live 15-min BTC market
+  - get_orderbook(ticker)
+  - get_positions()
+  - place_order(ticker, side, count, price_cents, dry_run)
+  - sell_position(ticker, side, count, price_cents, dry_run)
+  - cancel_order(order_id)
 """
 import base64
 import datetime
@@ -33,8 +34,7 @@ class KalshiClient:
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
 
-    # ── Auth helpers ─────────────────────────────────────────────────────────
-
+    # ── Auth helpers ──────────────────────────────────────────────────────────────────────────
     @staticmethod
     def _load_private_key(path: str):
         with open(path, "rb") as f:
@@ -69,8 +69,7 @@ class KalshiClient:
             "KALSHI-ACCESS-SIGNATURE": self._sign(ts, method, path),
         }
 
-    # ── Generic request ───────────────────────────────────────────────────────
-
+    # ── Generic request ─────────────────────────────────────────────────────────────────────────
     def _request(self, method: str, path: str, params: dict = None, json: dict = None) -> dict:
         """
         path is the short path, e.g. /portfolio/balance
@@ -90,8 +89,7 @@ class KalshiClient:
             resp.raise_for_status()
         return resp.json()
 
-    # ── Public API methods ────────────────────────────────────────────────────
-
+    # ── Public API methods ────────────────────────────────────────────────────────────────────────
     def get_balance(self) -> float:
         """Return available balance in dollars."""
         data = self._request("GET", "/portfolio/balance")
@@ -137,12 +135,12 @@ class KalshiClient:
         dry_run: bool = True,
     ) -> Optional[dict]:
         """
-        Place a limit order. Returns the order dict or None on dry run.
+        Place a limit buy order. Returns the order dict or None on dry run.
         side: 'yes' to buy YES contracts, 'no' to buy NO contracts.
         """
         if dry_run:
             log.info(
-                "[DRY RUN] Would place %s %s x%d @ %dc on %s",
+                "[DRY RUN] Would place BUY %s %s x%d @ %dc on %s",
                 side.upper(), ticker, count, price_cents, ticker
             )
             return None
@@ -157,7 +155,41 @@ class KalshiClient:
             payload["yes_price"] = price_cents
         else:
             payload["no_price"] = price_cents
-        log.info("Placing order: %s", payload)
+        log.info("Placing BUY order: %s", payload)
+        return self._request("POST", "/portfolio/orders", json=payload)
+
+    def sell_position(
+        self,
+        ticker: str,
+        side: str,
+        count: int,
+        price_cents: int,
+        dry_run: bool = True,
+    ) -> Optional[dict]:
+        """
+        Sell (exit) an existing position by placing a limit sell order.
+        side: 'yes' if you hold YES contracts, 'no' if you hold NO contracts.
+        price_cents: the limit price you are willing to accept for the sale.
+        On Kalshi, selling YES contracts = placing a sell action on the yes side.
+        """
+        if dry_run:
+            log.info(
+                "[DRY RUN] Would place SELL %s %s x%d @ %dc",
+                side.upper(), ticker, count, price_cents
+            )
+            return None
+        payload = {
+            "ticker": ticker,
+            "action": "sell",
+            "type": "limit",
+            "side": side,
+            "count": count,
+        }
+        if side == "yes":
+            payload["yes_price"] = price_cents
+        else:
+            payload["no_price"] = price_cents
+        log.info("Placing SELL order: %s", payload)
         return self._request("POST", "/portfolio/orders", json=payload)
 
     def cancel_order(self, order_id: str) -> dict:
