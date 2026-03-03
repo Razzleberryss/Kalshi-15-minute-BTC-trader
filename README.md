@@ -9,6 +9,8 @@ The bot now supports managing open positions before they expire:
 - **Stop-Loss:** Automatically sells a position if the contract price drops below your entry price by a set amount.
 - **Take-Profit:** Automatically sells a position if the contract price rises above your entry price by a set amount.
 - **Signal Reversal:** Sells an open position if the latest strategy signal flips against your current holding (e.g., holding YES but signal becomes NO).
+- **Daily Risk Limits:** Blocks new entries after hitting `MAX_DAILY_LOSS_CENTS` or `MAX_DAILY_TRADES`, while continuing to manage/exit open positions.
+- **Strict Market Scope:** Discovery and order placement are restricted to `BTC_SERIES_TICKER` markets only.
 
 ---
 
@@ -51,6 +53,8 @@ Edit `.env` and provide your Kalshi API details:
 - `KALSHI_ENV`: `demo` or `prod`
 - `STOP_LOSS_CENTS`: (New) Max cents to lose before exiting (default: 20)
 - `TAKE_PROFIT_CENTS`: (New) Target profit cents before exiting (default: 30)
+- `MAX_DAILY_LOSS_CENTS`: Max realized daily loss before stopping new entries (default: 1000)
+- `MAX_DAILY_TRADES`: Max new entries per day (default: 20)
 
 ### 3. Run the bot
 
@@ -61,6 +65,8 @@ python bot.py
 # To trade for real
 DRY_RUN=false python bot.py
 ```
+
+When running with `DRY_RUN=false` and `KALSHI_ENV=prod`, the bot logs a prominent live-trading warning banner at startup.
 
 ---
 

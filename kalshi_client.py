@@ -110,6 +110,10 @@ class KalshiClient:
         if not markets:
             log.warning("No open BTC 15-min markets found for series %s", config.BTC_SERIES_TICKER)
             return None
+        markets = [m for m in markets if self._is_btc_series_market(m.get("ticker", ""))]
+        if not markets:
+            log.warning("No open markets matched BTC series prefix %s-", config.BTC_SERIES_TICKER)
+            return None
         markets.sort(key=lambda m: m.get("close_time", ""))
         return markets[0]
 
@@ -126,6 +130,75 @@ class KalshiClient:
         data = self._request("GET", "/portfolio/positions")
         return data.get("market_positions", [])
 
+    def place_order_yes(
+        self, market_id: str, quantity: int, price: int, dry_run: bool = True
+    ) -> Optional[dict]:
+        return self._place_buy_order(market_id, "yes", quantity, price, dry_run)
+
+    def place_order_no(
+        self, market_id: str, quantity: int, price: int, dry_run: bool = True
+    ) -> Optional[dict]:
+        return self._place_buy_order(market_id, "no", quantity, price, dry_run)
+
+    def _place_buy_order(
+        self, market_id: str, side: str, quantity: int, price: int, dry_run: bool
+    ) -> Optional[dict]:
+        self._ensure_btc_market(market_id)
+        if dry_run:
+            log.info(
+                "[DRY RUN] Would place BUY %s %s x%d @ %dc",
+                side.upper(), market_id, quantity, price
+            )
+            return None
+        payload = {
+            "ticker": market_id,
+            "action": "buy",
+            "type": "limit",
+            "side": side,
+            "count": quantity,
+        }
+        if side == "yes":
+            payload["yes_price"] = price
+        else:
+            payload["no_price"] = price
+        log.info("Placing BUY order: %s", payload)
+        return self._request("POST", "/portfolio/orders", json=payload)
+
+    def sell_position(
+        self,
+        market_id: str,
+        side: str,
+        quantity: int,
+        price: int,
+        dry_run: bool = True,
+    ) -> Optional[dict]:
+        """
+        Sell (exit) an existing position by placing a limit sell order.
+        side: 'yes' if you hold YES contracts, 'no' if you hold NO contracts.
+        price_cents: the limit price you are willing to accept for the sale.
+        On Kalshi, selling YES contracts = placing a sell action on the yes side.
+        """
+        self._ensure_btc_market(market_id)
+        if dry_run:
+            log.info(
+                "[DRY RUN] Would place SELL %s %s x%d @ %dc",
+                side.upper(), market_id, quantity, price
+            )
+            return None
+        payload = {
+            "ticker": market_id,
+            "action": "sell",
+            "type": "limit",
+            "side": side,
+            "count": quantity,
+        }
+        if side == "yes":
+            payload["yes_price"] = price
+        else:
+            payload["no_price"] = price
+        log.info("Placing SELL order: %s", payload)
+        return self._request("POST", "/portfolio/orders", json=payload)
+
     def place_order(
         self,
         ticker: str,
@@ -135,62 +208,22 @@ class KalshiClient:
         dry_run: bool = True,
     ) -> Optional[dict]:
         """
-        Place a limit buy order. Returns the order dict or None on dry run.
+        Backward-compatible wrapper for buy helpers.
         side: 'yes' to buy YES contracts, 'no' to buy NO contracts.
         """
-        if dry_run:
-            log.info(
-                "[DRY RUN] Would place BUY %s %s x%d @ %dc on %s",
-                side.upper(), ticker, count, price_cents, ticker
-            )
-            return None
-        payload = {
-            "ticker": ticker,
-            "action": "buy",
-            "type": "limit",
-            "side": side,
-            "count": count,
-        }
         if side == "yes":
-            payload["yes_price"] = price_cents
-        else:
-            payload["no_price"] = price_cents
-        log.info("Placing BUY order: %s", payload)
-        return self._request("POST", "/portfolio/orders", json=payload)
+            return self.place_order_yes(ticker, count, price_cents, dry_run)
+        return self.place_order_no(ticker, count, price_cents, dry_run)
 
-    def sell_position(
-        self,
-        ticker: str,
-        side: str,
-        count: int,
-        price_cents: int,
-        dry_run: bool = True,
-    ) -> Optional[dict]:
-        """
-        Sell (exit) an existing position by placing a limit sell order.
-        side: 'yes' if you hold YES contracts, 'no' if you hold NO contracts.
-        price_cents: the limit price you are willing to accept for the sale.
-        On Kalshi, selling YES contracts = placing a sell action on the yes side.
-        """
-        if dry_run:
-            log.info(
-                "[DRY RUN] Would place SELL %s %s x%d @ %dc",
-                side.upper(), ticker, count, price_cents
+    @staticmethod
+    def _is_btc_series_market(market_id: str) -> bool:
+        return market_id.startswith(f"{config.BTC_SERIES_TICKER}-")
+
+    def _ensure_btc_market(self, market_id: str) -> None:
+        if not self._is_btc_series_market(market_id):
+            raise ValueError(
+                f"Refusing to trade non-BTC-series market '{market_id}'. Expected prefix {config.BTC_SERIES_TICKER}-"
             )
-            return None
-        payload = {
-            "ticker": ticker,
-            "action": "sell",
-            "type": "limit",
-            "side": side,
-            "count": count,
-        }
-        if side == "yes":
-            payload["yes_price"] = price_cents
-        else:
-            payload["no_price"] = price_cents
-        log.info("Placing SELL order: %s", payload)
-        return self._request("POST", "/portfolio/orders", json=payload)
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an open order by ID."""

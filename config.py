@@ -5,6 +5,7 @@ Loads all settings from .env and exposes them as typed constants.
 Import this module everywhere instead of calling os.getenv() directly.
 """
 import os
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -32,6 +33,8 @@ KALSHI_BASE_URL = BASE_URL  # alias used in kalshi_client.py
 MAX_TRADE_DOLLARS: float = float(os.getenv("MAX_TRADE_DOLLARS", "10"))
 MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
 MAX_TOTAL_EXPOSURE: float = float(os.getenv("MAX_TOTAL_EXPOSURE", "50"))
+MAX_DAILY_LOSS_CENTS: int = int(os.getenv("MAX_DAILY_LOSS_CENTS", "1000"))
+MAX_DAILY_TRADES: int = int(os.getenv("MAX_DAILY_TRADES", "20"))
 
 # Contract price range allowed (in cents, 1-99)
 MIN_CONTRACT_PRICE_CENTS: int = int(os.getenv("MIN_CONTRACT_PRICE_CENTS", "10"))
@@ -102,6 +105,10 @@ def validate() -> None:
         errors.append("MAX_OPEN_POSITIONS must be >= 1")
     if MAX_TOTAL_EXPOSURE < MAX_TRADE_DOLLARS:
         errors.append("MAX_TOTAL_EXPOSURE must be >= MAX_TRADE_DOLLARS")
+    if MAX_DAILY_LOSS_CENTS < 0:
+        errors.append("MAX_DAILY_LOSS_CENTS must be >= 0")
+    if MAX_DAILY_TRADES < 1:
+        errors.append("MAX_DAILY_TRADES must be >= 1")
     if not (1 <= MIN_CONTRACT_PRICE_CENTS <= 99):
         errors.append("MIN_CONTRACT_PRICE_CENTS must be between 1 and 99")
     if not (1 <= MAX_CONTRACT_PRICE_CENTS <= 99):
@@ -122,23 +129,26 @@ def validate() -> None:
         )
 
 if __name__ == "__main__":
-    # Quick sanity check: print all resolved config values
-    print(f"KALSHI_ENV            : {KALSHI_ENV}")
-    print(f"BASE_URL              : {BASE_URL}")
-    print(f"KALSHI_API_KEY_ID     : {'SET' if KALSHI_API_KEY_ID else 'NOT SET'}")
-    print(f"KALSHI_PRIVATE_KEY    : {KALSHI_PRIVATE_KEY_PATH}")
-    print(f"BTC_SERIES_TICKER     : {BTC_SERIES_TICKER}")
-    print(f"DRY_RUN               : {DRY_RUN}")
-    print(f"MAX_TRADE_DOLLARS     : ${MAX_TRADE_DOLLARS}")
-    print(f"MAX_OPEN_POSITIONS    : {MAX_OPEN_POSITIONS}")
-    print(f"MAX_TOTAL_EXPOSURE    : ${MAX_TOTAL_EXPOSURE}")
-    print(f"STOP_LOSS_CENTS       : {STOP_LOSS_CENTS}c")
-    print(f"TAKE_PROFIT_CENTS     : {TAKE_PROFIT_CENTS}c")
-    print(f"SIGNAL_REVERSAL_EXIT  : {SIGNAL_REVERSAL_EXIT}")
-    print(f"LOOP_INTERVAL_SECONDS : {LOOP_INTERVAL_SECONDS}s")
-    print(f"TRADE_LOG_FILE        : {TRADE_LOG_FILE}")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    log = logging.getLogger(__name__)
+    log.info("KALSHI_ENV            : %s", KALSHI_ENV)
+    log.info("BASE_URL              : %s", BASE_URL)
+    log.info("KALSHI_API_KEY_ID     : %s", "SET" if KALSHI_API_KEY_ID else "NOT SET")
+    log.info("KALSHI_PRIVATE_KEY    : %s", KALSHI_PRIVATE_KEY_PATH)
+    log.info("BTC_SERIES_TICKER     : %s", BTC_SERIES_TICKER)
+    log.info("DRY_RUN               : %s", DRY_RUN)
+    log.info("MAX_TRADE_DOLLARS     : $%s", MAX_TRADE_DOLLARS)
+    log.info("MAX_OPEN_POSITIONS    : %s", MAX_OPEN_POSITIONS)
+    log.info("MAX_TOTAL_EXPOSURE    : $%s", MAX_TOTAL_EXPOSURE)
+    log.info("MAX_DAILY_LOSS_CENTS  : %sc", MAX_DAILY_LOSS_CENTS)
+    log.info("MAX_DAILY_TRADES      : %s", MAX_DAILY_TRADES)
+    log.info("STOP_LOSS_CENTS       : %sc", STOP_LOSS_CENTS)
+    log.info("TAKE_PROFIT_CENTS     : %sc", TAKE_PROFIT_CENTS)
+    log.info("SIGNAL_REVERSAL_EXIT  : %s", SIGNAL_REVERSAL_EXIT)
+    log.info("LOOP_INTERVAL_SECONDS : %ss", LOOP_INTERVAL_SECONDS)
+    log.info("TRADE_LOG_FILE        : %s", TRADE_LOG_FILE)
     try:
         validate()
-        print("\nConfig validation: PASSED")
+        log.info("\nConfig validation: PASSED")
     except EnvironmentError as e:
-        print(f"\nConfig validation: FAILED\n{e}")
+        log.error("\nConfig validation: FAILED\n%s", e)

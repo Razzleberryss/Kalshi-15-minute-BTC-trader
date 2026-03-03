@@ -83,27 +83,35 @@ def manage_positions(client: KalshiClient, market: dict, positions: list, curren
         # 1. Stop Loss
         if config.STOP_LOSS_CENTS > 0:
             if current_price <= (entry_price - config.STOP_LOSS_CENTS):
-                exit_reason = f"STOP_LOSS hit: {current_price}c <= {entry_price}-{config.STOP_LOSS_CENTS}c"
+                exit_reason = "stop loss"
 
         # 2. Take Profit
         if config.TAKE_PROFIT_CENTS > 0 and not exit_reason:
             if current_price >= (entry_price + config.TAKE_PROFIT_CENTS):
-                exit_reason = f"TAKE_PROFIT hit: {current_price}c >= {entry_price}+{config.TAKE_PROFIT_CENTS}c"
+                exit_reason = "take profit"
 
         # 3. Signal Reversal
         if config.SIGNAL_REVERSAL_EXIT and current_signal and not exit_reason:
             if current_signal.side != side and current_signal.confidence >= config.MIN_EDGE_THRESHOLD:
-                exit_reason = f"SIGNAL_REVERSAL: signal is {current_signal.side.upper()} but holding {side.upper()}"
+                exit_reason = "signal reversal"
 
         if exit_reason:
-            log.warning("EXITING POSITION in %s: %s", ticker, exit_reason)
+            log.warning("EXITING POSITION in %s due to %s", ticker, exit_reason)
             client.sell_position(
-                ticker=ticker,
+                market_id=ticker,
                 side=side,
-                count=count,
-                price_cents=max(1, current_price - 1), # aggressive sell
+                quantity=count,
+                price=max(1, current_price - 1), # aggressive sell
                 dry_run=config.DRY_RUN
             )
+            yield {
+                "market": ticker,
+                "side": side,
+                "size": count,
+                "entry_price": entry_price,
+                "exit_price": max(1, current_price - 1),
+                "exit_reason": exit_reason,
+            }
 
 # ── Core bot loop ─────────────────────────────────────────────────────────────────────────────
 def run_once(client: KalshiClient, risk: RiskManager):
@@ -118,6 +126,9 @@ def run_once(client: KalshiClient, risk: RiskManager):
         return False
 
     ticker = market["ticker"]
+    if not ticker.startswith(f"{config.BTC_SERIES_TICKER}-"):
+        log.error("Refusing non-BTC-series market: %s", ticker)
+        return False
     log.info("Active market: %s | last=%sc yes=%s/%s no=%s/%s", 
              ticker, market.get("last_price"), 
              market.get("yes_bid"), market.get("yes_ask"),
@@ -136,7 +147,15 @@ def run_once(client: KalshiClient, risk: RiskManager):
     sig = generate_signal(market, orderbook)
     
     # 4. Manage existing positions first
-    manage_positions(client, market, positions, current_signal=sig)
+    for closed in manage_positions(client, market, positions, current_signal=sig) or []:
+        risk.log_exit_trade(
+            market=closed["market"],
+            side=closed["side"],
+            size=closed["size"],
+            entry_price=closed["entry_price"],
+            exit_price=closed["exit_price"],
+            exit_reason=closed["exit_reason"],
+        )
 
     # 5. Risk check for NEW trade
     if sig is None:
@@ -162,26 +181,25 @@ def run_once(client: KalshiClient, risk: RiskManager):
     )
 
     # 7. Execute
-    order = client.place_order(
-        ticker=ticker,
-        side=sig.side,
-        count=contracts,
-        price_cents=sig.price_cents,
-        dry_run=config.DRY_RUN,
-    )
+    if sig.side == "yes":
+        order = client.place_order_yes(
+            market_id=ticker,
+            quantity=contracts,
+            price=sig.price_cents,
+            dry_run=config.DRY_RUN,
+        )
+    else:
+        order = client.place_order_no(
+            market_id=ticker,
+            quantity=contracts,
+            price=sig.price_cents,
+            dry_run=config.DRY_RUN,
+        )
     order_id = order.get("order", {}).get("order_id") if order else None
 
     # 8. Log to CSV
-    risk.log_trade(
-        ticker=ticker,
-        side=sig.side,
-        contracts=contracts,
-        price_cents=sig.price_cents,
-        confidence=sig.confidence,
-        dry_run=config.DRY_RUN,
-        order_id=order_id,
-        reason=sig.reason,
-    )
+    risk.log_entry_trade(ticker, sig.side, contracts, sig.price_cents)
+    log.debug("Order id: %s", order_id)
     return True
 
 def main():
@@ -193,14 +211,19 @@ def main():
     log.info(" Stop Loss   : %sc", config.STOP_LOSS_CENTS)
     log.info(" Take Profit : %sc", config.TAKE_PROFIT_CENTS)
     log.info(" Reversal Ex : %s", config.SIGNAL_REVERSAL_EXIT)
+    log.info(" Max Daily Loss : %sc", config.MAX_DAILY_LOSS_CENTS)
+    log.info(" Max Daily Trades: %s", config.MAX_DAILY_TRADES)
     log.info("=" * 60)
+    if config.KALSHI_ENV == "prod" and not config.DRY_RUN:
+        log.warning("!" * 60)
+        log.warning("!!! LIVE TRADING ENABLED ON PRODUCTION - REAL MONEY AT RISK !!!")
+        log.warning("!" * 60)
 
     # Validate config before doing anything else
     try:
         config.validate()
     except EnvironmentError as e:
-        log.critical("Configuration error:
-%s", e)
+        log.critical("Configuration error:\n%s", e)
         sys.exit(1)
 
     client = KalshiClient()
