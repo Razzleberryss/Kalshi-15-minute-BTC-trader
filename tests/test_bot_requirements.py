@@ -49,6 +49,11 @@ class BotRequirementsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client._ensure_btc_market("NOTBTC-TEST")
 
+    def test_no_side_pnl_is_side_aware(self):
+        risk = RiskManager()
+        pnl = risk.log_exit_trade("BTCZ-TEST", "no", 2, 60, 40, "take profit")
+        self.assertEqual(pnl, 40)
+
 
 if __name__ == "__main__":
     unittest.main()

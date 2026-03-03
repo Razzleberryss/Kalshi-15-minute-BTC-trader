@@ -137,7 +137,7 @@ class RiskManager:
         exit_price: int,
         exit_reason: str,
     ) -> int:
-        pnl_cents = (exit_price - entry_price) * size
+        pnl_cents = (exit_price - entry_price) * size if side.lower() == "yes" else (entry_price - exit_price) * size
         self._reset_daily_if_needed()
         self._daily_realized_pnl_cents += pnl_cents
         row = {

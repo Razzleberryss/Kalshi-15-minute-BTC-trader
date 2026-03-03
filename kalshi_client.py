@@ -146,8 +146,8 @@ class KalshiClient:
         self._ensure_btc_market(market_id)
         if dry_run:
             log.info(
-                "[DRY RUN] Would place BUY %s %s x%d @ %dc on %s",
-                side.upper(), market_id, quantity, price, market_id
+                "[DRY RUN] Would place BUY %s %s x%d @ %dc",
+                side.upper(), market_id, quantity, price
             )
             return None
         payload = {
