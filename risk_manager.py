@@ -26,7 +26,11 @@ class RiskManager:
     """Stateful risk guard. One instance lives for the duration of the bot run."""
 
     def __init__(self):
+        self._today = datetime.now(timezone.utc).date()
+        self._daily_trade_count = 0
+        self._daily_realized_pnl_cents = 0
         self._ensure_log_file()
+        self._load_daily_stats_from_log()
 
     # ── Trade approval ───────────────────────────────────────────────────────────
 
@@ -42,9 +46,19 @@ class RiskManager:
         Gates the trade against all risk limits.
         """
         # 1. Already have a position in this market?
+        self._reset_daily_if_needed()
         existing = [p for p in positions if p.get("ticker") == market_ticker]
         if existing:
             return False, f"Already have a position in {market_ticker}"
+
+        if self._daily_trade_count >= config.MAX_DAILY_TRADES:
+            return False, (
+                f"MAX_DAILY_TRADES reached ({self._daily_trade_count}/{config.MAX_DAILY_TRADES})"
+            )
+        if self._daily_realized_pnl_cents <= -config.MAX_DAILY_LOSS_CENTS:
+            return False, (
+                f"MAX_DAILY_LOSS_CENTS reached ({self._daily_realized_pnl_cents} <= -{config.MAX_DAILY_LOSS_CENTS})"
+            )
 
         # 2. Max open positions
         open_count = len(positions)
@@ -93,34 +107,83 @@ class RiskManager:
 
     # ── Trade logging ─────────────────────────────────────────────────────────────
 
-    def log_trade(
+    def log_entry_trade(
         self,
-        ticker: str,
+        market: str,
         side: str,
-        contracts: int,
-        price_cents: int,
-        confidence: float,
-        dry_run: bool,
-        order_id: Optional[str] = None,
-        reason: str = "",
-    ):
-        """Append one row to the CSV trade log."""
+        size: int,
+        entry_price: int,
+    ) -> None:
+        self._reset_daily_if_needed()
+        self._daily_trade_count += 1
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "ticker": ticker,
-            "side": side,
-            "contracts": contracts,
-            "price_cents": price_cents,
-            "cost_dollars": round(contracts * price_cents / 100, 2),
-            "confidence": round(confidence, 4),
-            "dry_run": dry_run,
-            "order_id": order_id or "",
-            "reason": reason,
+            "market": market,
+            "side": side.upper(),
+            "size": size,
+            "entry_price": entry_price,
+            "exit_price": "",
+            "pnl": "",
+            "exit_reason": "entry",
         }
-        with open(config.TRADE_LOG_FILE, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        self._append_trade_row(row)
+
+    def log_exit_trade(
+        self,
+        market: str,
+        side: str,
+        size: int,
+        entry_price: int,
+        exit_price: int,
+        exit_reason: str,
+    ) -> int:
+        pnl_cents = (exit_price - entry_price) * size
+        self._reset_daily_if_needed()
+        self._daily_realized_pnl_cents += pnl_cents
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market": market,
+            "side": side.upper(),
+            "size": size,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "pnl": pnl_cents,
+            "exit_reason": exit_reason,
+        }
+        self._append_trade_row(row)
+        return pnl_cents
+
+    def _append_trade_row(self, row: dict) -> None:
+        with open(config.TRADE_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self._trade_log_headers())
             writer.writerow(row)
         log.info("Trade logged: %s", row)
+
+    def _reset_daily_if_needed(self) -> None:
+        today = datetime.now(timezone.utc).date()
+        if today != self._today:
+            self._today = today
+            self._daily_trade_count = 0
+            self._daily_realized_pnl_cents = 0
+
+    def _load_daily_stats_from_log(self) -> None:
+        if not os.path.exists(config.TRADE_LOG_FILE):
+            return
+        try:
+            today_iso = self._today.isoformat()
+            with open(config.TRADE_LOG_FILE, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ts = row.get("timestamp", "")
+                    if not ts.startswith(today_iso):
+                        continue
+                    if row.get("exit_reason") == "entry":
+                        self._daily_trade_count += 1
+                    pnl_str = row.get("pnl", "")
+                    if pnl_str not in ("", None):
+                        self._daily_realized_pnl_cents += int(float(pnl_str))
+        except Exception as exc:
+            log.warning("Unable to load daily stats from trade log: %s", exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -138,12 +201,20 @@ class RiskManager:
     def _ensure_log_file(self):
         """Create the CSV with headers if it doesn't already exist."""
         if not os.path.exists(config.TRADE_LOG_FILE):
-            headers = [
-                "timestamp", "ticker", "side", "contracts",
-                "price_cents", "cost_dollars", "confidence",
-                "dry_run", "order_id", "reason",
-            ]
-            with open(config.TRADE_LOG_FILE, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=headers)
+            with open(config.TRADE_LOG_FILE, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self._trade_log_headers())
                 writer.writeheader()
             log.info("Created trade log: %s", config.TRADE_LOG_FILE)
+
+    @staticmethod
+    def _trade_log_headers() -> list[str]:
+        return [
+            "timestamp",
+            "market",
+            "side",
+            "size",
+            "entry_price",
+            "exit_price",
+            "pnl",
+            "exit_reason",
+        ]
