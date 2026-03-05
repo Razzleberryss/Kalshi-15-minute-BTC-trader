@@ -225,6 +225,23 @@ class KalshiClient:
                 f"Refusing to trade non-BTC-series market '{market_id}'. Expected prefix {config.BTC_SERIES_TICKER}-"
             )
 
+    def close_position(
+        self,
+        market_id: str,
+        side: str,
+        quantity: int,
+        price: int,
+        dry_run: bool = True,
+    ) -> Optional[dict]:
+        """
+        Close (exit) an open position by placing a limit sell order.
+        Delegates to sell_position(); provided as a semantically clear entry point
+        for position-management code.
+        side: 'yes' if you hold YES contracts, 'no' if you hold NO contracts.
+        price: the minimum price (in cents) you are willing to accept.
+        """
+        return self.sell_position(market_id, side, quantity, price, dry_run)
+
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an open order by ID."""
         return self._request("DELETE", f"/portfolio/orders/{order_id}")

@@ -29,6 +29,8 @@ class RiskManager:
         self._today = datetime.now(timezone.utc).date()
         self._daily_trade_count = 0
         self._daily_realized_pnl_cents = 0
+        # Tracks only positions opened by this bot instance (keyed by ticker)
+        self._open_positions: dict[str, dict] = {}
         self._ensure_log_file()
         self._load_daily_stats_from_log()
 
@@ -45,10 +47,9 @@ class RiskManager:
         Returns (approved: bool, reason: str).
         Gates the trade against all risk limits.
         """
-        # 1. Already have a position in this market?
+        # 1. Already have a position in this market (opened by this bot)?
         self._reset_daily_if_needed()
-        existing = [p for p in positions if p.get("ticker") == market_ticker]
-        if existing:
+        if market_ticker in self._open_positions:
             return False, f"Already have a position in {market_ticker}"
 
         if self._daily_trade_count >= config.MAX_DAILY_TRADES:
@@ -184,6 +185,36 @@ class RiskManager:
                         self._daily_realized_pnl_cents += int(float(pnl_str))
         except Exception as exc:
             log.warning("Unable to load daily stats from trade log: %s", exc)
+
+    # ── Bot position tracking ─────────────────────────────────────────────────
+
+    def record_open_position(
+        self,
+        ticker: str,
+        side: str,
+        quantity: int,
+        entry_price: int,
+    ) -> None:
+        """Record a position opened by this bot so we can manage it later."""
+        self._open_positions[ticker] = {
+            "ticker": ticker,
+            "side": side,
+            "quantity": quantity,
+            "entry_price": entry_price,
+        }
+        log.debug(
+            "Tracking new position: %s %s x%d @ %dc",
+            ticker, side, quantity, entry_price,
+        )
+
+    def record_closed_position(self, ticker: str) -> None:
+        """Remove a position from tracking after it has been closed."""
+        self._open_positions.pop(ticker, None)
+        log.debug("Removed closed position from tracking: %s", ticker)
+
+    def get_open_positions(self) -> dict[str, dict]:
+        """Return a deep snapshot of positions opened by this bot instance."""
+        return {ticker: dict(pos) for ticker, pos in self._open_positions.items()}
 
     # ── Helpers ───────────────────────────────────────────────────────────────────
 
