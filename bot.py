@@ -19,6 +19,7 @@ import logging
 import signal
 import sys
 import time
+import datetime
 
 import colorlog
 
@@ -59,59 +60,84 @@ signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
 # ── Position Management ────────────────────────────────────────────────────────────────────────
-def manage_positions(client: KalshiClient, market: dict, positions: list, current_signal=None):
+def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, current_signal=None):
     """
-    Check open positions for stop-loss, take-profit, or signal reversal.
-    Exits positions if any criteria are met.
+    Check positions opened by this bot for stop-loss, take-profit, signal reversal, or expiry.
+    Only positions recorded via risk.record_open_position() are managed here, so pre-existing
+    positions from other bots on the same account are never touched.
+    Yields a dict for every position that is exited.
     """
     ticker = market["ticker"]
-    active_pos = [p for p in positions if p.get("ticker") == ticker]
-    
-    if not active_pos:
+    bot_positions = risk.get_open_positions()
+
+    if ticker not in bot_positions:
         return
 
-    for pos in active_pos:
-        side = pos.get("side") # 'yes' or 'no'
-        count = abs(pos.get("position", 0))
-        entry_price = pos.get("average_price", 50)
-        
-        # Get current market price for our side
-        current_price = market.get(f"{side}_bid", entry_price) # what we can sell for right now
-        
-        exit_reason = None
-        
-        # 1. Stop Loss
-        if config.STOP_LOSS_CENTS > 0:
-            if current_price <= (entry_price - config.STOP_LOSS_CENTS):
-                exit_reason = "stop loss"
+    pos = bot_positions[ticker]
+    side = pos["side"]
+    count = pos["quantity"]
+    entry_price = pos["entry_price"]
 
-        # 2. Take Profit
-        if config.TAKE_PROFIT_CENTS > 0 and not exit_reason:
-            if current_price >= (entry_price + config.TAKE_PROFIT_CENTS):
-                exit_reason = "take profit"
+    # Current best bid for our side — what we can sell for right now
+    current_price = market.get(f"{side}_bid", entry_price)
 
-        # 3. Signal Reversal
-        if config.SIGNAL_REVERSAL_EXIT and current_signal and not exit_reason:
-            if current_signal.side != side and current_signal.confidence >= config.MIN_EDGE_THRESHOLD:
-                exit_reason = "signal reversal"
+    exit_reason = None
 
-        if exit_reason:
-            log.warning("EXITING POSITION in %s due to %s", ticker, exit_reason)
-            client.sell_position(
-                market_id=ticker,
-                side=side,
-                quantity=count,
-                price=max(1, current_price - 1), # aggressive sell
-                dry_run=config.DRY_RUN
-            )
-            yield {
-                "market": ticker,
-                "side": side,
-                "size": count,
-                "entry_price": entry_price,
-                "exit_price": max(1, current_price - 1),
-                "exit_reason": exit_reason,
-            }
+    # 1. Stop Loss
+    if config.STOP_LOSS_CENTS > 0:
+        if current_price <= (entry_price - config.STOP_LOSS_CENTS):
+            exit_reason = "stop_loss"
+
+    # 2. Take Profit
+    if config.TAKE_PROFIT_CENTS > 0 and not exit_reason:
+        if current_price >= (entry_price + config.TAKE_PROFIT_CENTS):
+            exit_reason = "take_profit"
+
+    # 3. Signal Reversal
+    if config.SIGNAL_REVERSAL_EXIT and current_signal and not exit_reason:
+        if current_signal.side != side and current_signal.confidence >= config.MIN_EDGE_THRESHOLD:
+            exit_reason = "reversal"
+
+    # 4. Expiry: exit when less than 2 minutes remain before contract close
+    if not exit_reason:
+        close_time_str = market.get("close_time")
+        if close_time_str:
+            try:
+                close_time = datetime.datetime.fromisoformat(
+                    close_time_str.replace("Z", "+00:00")
+                )
+                now = datetime.datetime.now(datetime.timezone.utc)
+                if (close_time - now).total_seconds() <= 120:
+                    exit_reason = "expiry"
+            except (ValueError, TypeError):
+                pass
+
+    if exit_reason:
+        exit_price = max(1, current_price - 1)  # aggressive limit sell
+        pnl_cents = (
+            (exit_price - entry_price) * count
+            if side == "yes"
+            else (entry_price - exit_price) * count
+        )
+        log.warning(
+            "EXIT %s | side=%s | entry=%dc | exit=%dc | pnl=%+dc | reason=%s",
+            ticker, side, entry_price, exit_price, pnl_cents, exit_reason,
+        )
+        client.close_position(
+            market_id=ticker,
+            side=side,
+            quantity=count,
+            price=exit_price,
+            dry_run=config.DRY_RUN,
+        )
+        yield {
+            "market": ticker,
+            "side": side,
+            "size": count,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "exit_reason": exit_reason,
+        }
 
 # ── Core bot loop ─────────────────────────────────────────────────────────────────────────────
 def run_once(client: KalshiClient, risk: RiskManager):
@@ -147,7 +173,8 @@ def run_once(client: KalshiClient, risk: RiskManager):
     sig = generate_signal(market, orderbook)
     
     # 4. Manage existing positions first
-    for closed in manage_positions(client, market, positions, current_signal=sig) or []:
+    for closed in manage_positions(client, market, risk, current_signal=sig) or []:
+        risk.record_closed_position(closed["market"])
         risk.log_exit_trade(
             market=closed["market"],
             side=closed["side"],
@@ -197,7 +224,8 @@ def run_once(client: KalshiClient, risk: RiskManager):
         )
     order_id = order.get("order", {}).get("order_id") if order else None
 
-    # 8. Log to CSV
+    # 8. Log to CSV and track the open position
+    risk.record_open_position(ticker, sig.side, contracts, sig.price_cents)
     risk.log_entry_trade(ticker, sig.side, contracts, sig.price_cents)
     log.debug("Order id: %s", order_id)
     return True
