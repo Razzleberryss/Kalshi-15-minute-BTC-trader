@@ -294,9 +294,35 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
     side = "yes" if action == "BUY_YES" else "no"
     price = suggest_limit_price(market, side)
 
+    # Re-run fee-aware decision at the expected entry price (in dollars) to avoid
+    # overstating edge/net EV when the execution price is worse than the mid.
+    entry_price = float(np.clip(price / 100.0, 0.01, 0.99))
+    action_at_entry, size_at_entry = decide_trade(entry_price, model_p_yes)
+
+    # If the trade no longer passes filters at the true entry price (or flips side),
+    # skip it to avoid executing a trade that fails the fee-aware check.
+    if action_at_entry == "NO_TRADE":
+        log.info(
+            "decide_trade rejected trade at entry price (composite=%.3f market_price=%.2f "
+            "entry_price=%.2f model_p_yes=%.2f) — no trade this cycle",
+            composite, market_price, entry_price, model_p_yes,
+        )
+        return None
+
+    side_at_entry = "yes" if action_at_entry == "BUY_YES" else "no"
+    if side_at_entry != side:
+        log.info(
+            "decide_trade side flipped at entry price (composite=%.3f market_price=%.2f "
+            "entry_price=%.2f model_p_yes=%.2f initial_side=%s entry_side=%s) — no trade",
+            composite, market_price, entry_price, model_p_yes, side, side_at_entry,
+        )
+        return None
+
+    final_size = size_at_entry
+
     reason = (
         f"momentum={momentum:+.3f} skew={skew:+.3f} composite={composite:+.3f} → "
-        f"{side.upper()} @ {price}c (confidence={confidence:.2%} size={size})"
+        f"{side.upper()} @ {price}c (confidence={confidence:.2%} size={final_size})"
     )
 
-    return Signal(side=side, confidence=confidence, price_cents=price, reason=reason, size=size)
+    return Signal(side=side, confidence=confidence, price_cents=price, reason=reason, size=final_size)
