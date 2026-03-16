@@ -9,13 +9,15 @@ Strategy: Momentum + Orderbook Skew
        - side: 'yes' | 'no' | None (no trade)
        - confidence: 0.0 – 1.0
        - target_price_cents: limit price to use
+       - size: edge-scaled contract count
 
 This is intentionally simple and rule-based — a solid foundation
 you can expand with ML, cross-market arb, etc. later.
 """
 
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -32,6 +34,7 @@ class Signal:
     confidence: float   # 0.0 to 1.0
     price_cents: int    # suggested limit price
     reason: str         # human-readable explanation
+    size: int = field(default=1)  # edge-scaled contract count from decide_trade
 
 
 def get_btc_momentum() -> Optional[float]:
@@ -112,6 +115,132 @@ def suggest_limit_price(market: dict, side: str) -> int:
     return max(config.MIN_CONTRACT_PRICE_CENTS, min(config.MAX_CONTRACT_PRICE_CENTS, price))
 
 
+def decide_trade(
+    market_price: float,
+    model_p_yes: float,
+    side_allowed_flags: Optional[dict] = None,
+    cfg=None,
+) -> tuple[str, int]:
+    """
+    Pure fee-aware entry decision function.
+
+    Parameters
+    ----------
+    market_price : float
+        YES contract price in dollars (e.g. 0.42 for 42 cents).
+    model_p_yes : float
+        Model's estimated probability of YES outcome (0.0 – 1.0).
+    side_allowed_flags : dict, optional
+        Which sides are eligible, e.g. {"yes": True, "no": True}.
+        Defaults to both sides allowed.
+    cfg : module, optional
+        Config object/module supplying all fee-aware parameters.
+        Defaults to the imported ``config`` module.
+
+    Returns
+    -------
+    tuple[str, int]
+        ("BUY_YES", C), ("BUY_NO", C), or ("NO_TRADE", 0).
+
+    Decision logic
+    --------------
+    1. Compute mispricing = model_p_yes - market_p_yes.
+    2. Only trade if |mispricing| >= cfg.MIN_EDGE_PCT.
+    3. Skip trade if entry price is in the forbidden band
+       (cfg.FORBIDDEN_PRICE_LOW, cfg.FORBIDDEN_PRICE_HIGH).
+    4. Dynamically size contracts based on edge magnitude.
+    5. Compute approximate fees (ceil rule) and expected net value per
+       contract; skip if it falls below cfg.MIN_EXPECTED_NET_PER_CONTRACT.
+    """
+    if cfg is None:
+        cfg = config
+
+    if side_allowed_flags is None:
+        side_allowed_flags = {"yes": True, "no": True}
+
+    # Clip to a valid probability range
+    P = float(np.clip(market_price, 0.01, 0.99))
+    model_p_yes = float(np.clip(model_p_yes, 0.0, 1.0))
+
+    # ── 1. Mispricing check ────────────────────────────────────────────────────
+    market_p_yes = P  # YES price ≈ market-implied probability of YES
+    mispricing = model_p_yes - market_p_yes
+
+    if mispricing >= cfg.MIN_EDGE_PCT:
+        if not side_allowed_flags.get("yes", True):
+            log.debug(
+                "decide_trade: BUY_YES indicated (mispricing=%.4f) "
+                "but YES side is disabled by side_allowed_flags — NO_TRADE",
+                mispricing,
+            )
+            return "NO_TRADE", 0
+        action = "BUY_YES"
+        # Expected gross value per contract for buying YES
+        ev_gross = model_p_yes * 1.0 - P
+    elif mispricing <= -cfg.MIN_EDGE_PCT:
+        if not side_allowed_flags.get("no", True):
+            log.debug(
+                "decide_trade: BUY_NO indicated (mispricing=%.4f) "
+                "but NO side is disabled by side_allowed_flags — NO_TRADE",
+                mispricing,
+            )
+            return "NO_TRADE", 0
+        action = "BUY_NO"
+        # Expected gross value per contract for buying NO
+        # (pay 1-P for a NO contract, win 1.00 if outcome is NO)
+        ev_gross = (1.0 - model_p_yes) * 1.0 - (1.0 - P)
+    else:
+        log.debug(
+            "decide_trade: mispricing %.4f within no-trade band ±%.4f — NO_TRADE",
+            mispricing, cfg.MIN_EDGE_PCT,
+        )
+        return "NO_TRADE", 0
+
+    # ── 2. Forbidden price band check ─────────────────────────────────────────
+    if cfg.FORBIDDEN_PRICE_LOW < P < cfg.FORBIDDEN_PRICE_HIGH:
+        log.debug(
+            "decide_trade: price %.2f inside forbidden band (%.2f, %.2f) — NO_TRADE",
+            P, cfg.FORBIDDEN_PRICE_LOW, cfg.FORBIDDEN_PRICE_HIGH,
+        )
+        return "NO_TRADE", 0
+
+    # ── 3. Dynamic sizing ─────────────────────────────────────────────────────
+    edge_mag = abs(mispricing)
+    if cfg.MAX_EDGE_PCT > cfg.MIN_EDGE_PCT:
+        edge_ratio = (edge_mag - cfg.MIN_EDGE_PCT) / (cfg.MAX_EDGE_PCT - cfg.MIN_EDGE_PCT)
+        edge_ratio = float(np.clip(edge_ratio, 0.0, 1.0))
+    else:
+        edge_ratio = 1.0
+
+    # Use math.floor(x + 0.5) for half-up rounding instead of Python's built-in
+    # round(), which uses banker's rounding (round-half-to-even) and can cause
+    # non-monotonic sizing steps at exact half increments.
+    C = max(1, math.floor(cfg.BASE_SIZE + edge_ratio * (cfg.MAX_SIZE - cfg.BASE_SIZE) + 0.5))
+
+    # ── 4. Fee and net EV check ────────────────────────────────────────────────
+    # P_exit=0.5 is intentionally the worst-case (maximum-fee) assumption:
+    # P*(1-P) peaks at P=0.5, so using 0.5 maximises the estimated close fee,
+    # making the EV filter more conservative and harder to pass.
+    P_exit = 0.5
+    # Fees are in cents (ceil of formula); convert to dollars for EV comparison
+    fee_open_cents = math.ceil(0.07 * C * P * (1.0 - P))
+    fee_close_cents = math.ceil(0.07 * C * P_exit * (1.0 - P_exit))
+    ev_net_per_contract = ev_gross - (fee_open_cents + fee_close_cents) / 100.0 / C
+
+    if ev_net_per_contract < cfg.MIN_EXPECTED_NET_PER_CONTRACT:
+        log.debug(
+            "decide_trade: EV/contract $%.4f < threshold $%.4f — NO_TRADE",
+            ev_net_per_contract, cfg.MIN_EXPECTED_NET_PER_CONTRACT,
+        )
+        return "NO_TRADE", 0
+
+    log.debug(
+        "decide_trade: %s C=%d price=%.2f mispricing=%.4f EV/contract=$%.4f",
+        action, C, P, mispricing, ev_net_per_contract,
+    )
+    return action, C
+
+
 def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
     """
     Main entry point.  Returns a Signal or None if no trade warranted.
@@ -119,6 +248,15 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
     Combines:
       - BTC short-term momentum  (weight 0.6)
       - Kalshi orderbook skew    (weight 0.4)
+
+    The composite score is mapped to a model_p_yes probability and passed
+    through decide_trade(), which enforces fee-aware entry filters and
+    dynamic sizing before a Signal is emitted.
+
+    A Signal with size=0 is returned when decide_trade blocks the entry but
+    a clear directional preference exists; manage_positions can still use
+    this for SIGNAL_REVERSAL_EXIT even though no new contract will be opened.
+    Returns None only when momentum data is unavailable (no directional view).
     """
     momentum = get_btc_momentum()
     if momentum is None:
@@ -136,17 +274,81 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
         composite, momentum, skew, confidence,
     )
 
-    # Only trade if we have sufficient edge
-    if confidence < config.MIN_EDGE_THRESHOLD:
-        log.info("Confidence %.3f below threshold %.3f — no trade", confidence, config.MIN_EDGE_THRESHOLD)
-        return None
-
+    # Determine directional preference from composite.  This is set early so it
+    # is available for the NO_TRADE path (reversal signal with size=0).
     side = "yes" if composite > 0 else "no"
-    price = suggest_limit_price(market, side)
+
+    # Market mid is used solely to anchor model_p_yes (independent of spread).
+    yes_bid = market.get("yes_bid", 50)
+    yes_ask = market.get("yes_ask", 50)
+    if "yes_bid" not in market or "yes_ask" not in market:
+        log.warning(
+            "Market data missing yes_bid/yes_ask — defaulting to 50c mid price; "
+            "decide_trade will apply configured price-band filters to this default"
+        )
+    market_mid = float(np.clip((yes_bid + yes_ask) / 2 / 100.0, 0.01, 0.99))
+
+    # Map composite score to a model probability estimate.
+    # A composite of ±1.0 shifts the market price by up to ±0.50,
+    # so at MIN_EDGE_PCT=0.10 a composite of 0.20 is the minimum qualifying signal.
+    model_p_yes = float(np.clip(market_mid + composite * 0.5, 0.01, 0.99))
+
+    # Use the side-specific suggested entry price (what the bot actually pays)
+    # rather than the mid, so that decide_trade's mispricing and fee/EV checks
+    # reflect the real cost of entry and are not overstated.
+    entry_price_cents = suggest_limit_price(market, side)
+    if side == "yes":
+        # YES contracts: cost = entry_price_cents / 100 dollars
+        entry_p = float(np.clip(entry_price_cents / 100.0, 0.01, 0.99))
+    else:
+        # NO contracts: a NO contract at X cents ≡ YES price of (100-X) cents.
+        # Expressing cost in YES-equivalent terms lets decide_trade use its
+        # standard formulas: mispricing = model_p_yes - entry_p (<0 for NO edge),
+        # and fee ∝ entry_p * (1 - entry_p) = no_price * (1 - no_price).
+        entry_p = float(np.clip(1.0 - entry_price_cents / 100.0, 0.01, 0.99))
+
+    # Fee-aware entry decision (handles edge threshold, forbidden bands, sizing)
+    action, size = decide_trade(entry_p, model_p_yes)
+
+    if action == "NO_TRADE":
+        # Entry is blocked by fee/band filters.  Return a Signal with size=0 so
+        # that SIGNAL_REVERSAL_EXIT in manage_positions can still trigger when the
+        # composite direction opposes an open position, even though no new entry
+        # will be opened (bot.py skips entry logic when sig.size == 0).
+        log.info(
+            "decide_trade returned NO_TRADE (composite=%.3f entry_p=%.2f "
+            "model_p_yes=%.2f) — no new entry this cycle",
+            composite, entry_p, model_p_yes,
+        )
+        return Signal(
+            side=side,
+            confidence=confidence,
+            price_cents=entry_price_cents,
+            reason=f"NO_TRADE: composite={composite:+.3f}",
+            size=0,
+        )
+
+    # Guard: if decide_trade's action disagrees with the composite-derived side,
+    # entry_price_cents (computed for `side`) would be wrong for the opposite side.
+    # Treat the mismatch as NO_TRADE to avoid placing an order at an incorrect price.
+    action_side = "yes" if action == "BUY_YES" else "no"
+    if action_side != side:
+        log.info(
+            "decide_trade action (%s) disagrees with composite side (%s) "
+            "(composite=%.3f entry_p=%.2f model_p_yes=%.2f) — treating as NO_TRADE",
+            action_side, side, composite, entry_p, model_p_yes,
+        )
+        return Signal(
+            side=side,
+            confidence=confidence,
+            price_cents=entry_price_cents,
+            reason=f"NO_TRADE: side mismatch composite={composite:+.3f}",
+            size=0,
+        )
 
     reason = (
-        f"momentum={momentum:+.3f} skew={skew:+.3f} → {side.upper()} "
-        f"@ {price}c (confidence={confidence:.2%})"
+        f"momentum={momentum:+.3f} skew={skew:+.3f} composite={composite:+.3f} → "
+        f"{side.upper()} @ {entry_price_cents}c (confidence={confidence:.2%} size={size})"
     )
 
-    return Signal(side=side, confidence=confidence, price_cents=price, reason=reason)
+    return Signal(side=side, confidence=confidence, price_cents=entry_price_cents, reason=reason, size=size)

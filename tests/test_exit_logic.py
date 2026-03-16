@@ -219,6 +219,22 @@ class TestExitLogic(unittest.TestCase):
 
         self.assertEqual(len(results), 0)
 
+    def test_reversal_triggers_with_size_zero_no_entry_signal(self):
+        # A Signal with size=0 (entry blocked by fee filters) must still trigger
+        # reversal so that SIGNAL_REVERSAL_EXIT remains effective for open positions.
+        client = self._make_client()
+        risk = self._make_risk(side="yes", entry_price=55)
+        market = self._make_market(yes_bid=55)
+        signal = Signal(
+            side="no", confidence=0.9, price_cents=45,
+            reason="NO_TRADE: composite=-0.500", size=0,
+        )
+
+        results = list(manage_positions(client, market, risk, current_signal=signal))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["exit_reason"], "reversal")
+
     # ── Expiry ─────────────────────────────────────────────────────────────────
 
     def test_expiry_triggers_when_close_time_within_2_minutes(self):
