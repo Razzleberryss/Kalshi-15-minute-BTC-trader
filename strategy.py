@@ -249,22 +249,25 @@ def decide_trade_time_delay(
     current_window_id: str,
     last_trade_window_id: "str | None",
     cfg,
+    trades_in_current_window: int = 0,
+    up_bid: "float | None" = None,
+    down_bid: "float | None" = None,
 ) -> tuple[str, "int | None"]:
     """
     Reddit-style "time delay + stop-loss" entry/exit decision.
 
     Returns one of:
-      ("ENTER_YES", size)    – buy YES contracts
-      ("ENTER_NO", size)     – buy NO contracts
+      ("ENTER_YES", size)     – buy YES contracts
+      ("ENTER_NO", size)      – buy NO contracts
       ("EXIT_POSITION", None) – exit the current open position
-      ("NO_TRADE", None)     – do nothing this cycle
+      ("NO_TRADE", None)      – do nothing this cycle
 
     Parameters
     ----------
     up_price : float
-        Current YES contract price in dollars (0.0–1.0).
+        Current YES ask price in dollars (0.0–1.0).  Used for entry checks.
     down_price : float
-        Current NO contract price in dollars (0.0–1.0).
+        Current NO ask price in dollars (0.0–1.0).  Used for entry checks.
     minutes_to_expiry : int
         Minutes remaining until the 15-minute window closes.
     current_position_side : str | None
@@ -276,27 +279,41 @@ def decide_trade_time_delay(
     cfg : module or SimpleNamespace
         Config object supplying TRIGGER_POINT_PRICE, EXIT_POINT_PRICE,
         TRIGGER_MINUTE_REMAINING, MAX_TRADES_PER_WINDOW, and BASE_SIZE.
+    trades_in_current_window : int, optional
+        Number of entries already placed in the current window.  Resets to 0
+        when the window ID changes.  Default is 0.
+    up_bid : float | None, optional
+        Current YES bid price in dollars.  When provided, used for the YES
+        stop-loss exit check instead of ``up_price``.  Defaults to ``up_price``.
+    down_bid : float | None, optional
+        Current NO bid price in dollars.  When provided, used for the NO
+        stop-loss exit check instead of ``down_price``.  Defaults to ``down_price``.
     """
     trigger = cfg.TRIGGER_POINT_PRICE
-    exit_price = cfg.EXIT_POINT_PRICE
+    exit_point_price = cfg.EXIT_POINT_PRICE
     trigger_minutes = cfg.TRIGGER_MINUTE_REMAINING
     max_trades = cfg.MAX_TRADES_PER_WINDOW
     size = cfg.BASE_SIZE
+
+    # Use bid prices for exit comparisons (the price we can actually sell at);
+    # fall back to the ask prices when bid data is not available.
+    _exit_up = up_bid if up_bid is not None else up_price
+    _exit_down = down_bid if down_bid is not None else down_price
 
     if current_position_side is None:
         # Not yet armed — too much time left
         if minutes_to_expiry > trigger_minutes:
             return ("NO_TRADE", None)
 
-        # Already traded in this window and per-window limit reached
-        if last_trade_window_id == current_window_id and max_trades == 1:
+        # Already reached the per-window entry limit
+        if trades_in_current_window >= max_trades:
             return ("NO_TRADE", None)
 
-        # Enter YES if only the UP side qualifies
+        # Enter YES if only the UP side qualifies (using ask prices for entry)
         if up_price >= trigger and down_price < trigger:
             return ("ENTER_YES", size)
 
-        # Enter NO if only the DOWN side qualifies
+        # Enter NO if only the DOWN side qualifies (using ask prices for entry)
         if down_price >= trigger and up_price < trigger:
             return ("ENTER_NO", size)
 
@@ -304,13 +321,19 @@ def decide_trade_time_delay(
         return ("NO_TRADE", None)
 
     elif current_position_side == "YES":
-        if up_price <= exit_price:
+        # Stop-loss check uses bid price (the price we can exit at)
+        if _exit_up <= exit_point_price:
             return ("EXIT_POSITION", None)
         return ("NO_TRADE", None)
 
-    else:  # current_position_side == "NO"
-        if down_price <= exit_price:
+    elif current_position_side == "NO":
+        # Stop-loss check uses bid price (the price we can exit at)
+        if _exit_down <= exit_point_price:
             return ("EXIT_POSITION", None)
+        return ("NO_TRADE", None)
+
+    else:
+        # Unexpected / invalid position side — do nothing safely
         return ("NO_TRADE", None)
 
 
@@ -322,6 +345,9 @@ def decide_trade(
     current_window_id: str,
     last_trade_window_id: "str | None",
     cfg,
+    trades_in_current_window: int = 0,
+    up_bid: "float | None" = None,
+    down_bid: "float | None" = None,
 ) -> tuple[str, "int | None"]:
     """
     Strategy-mode router.  Delegates to the appropriate strategy function
@@ -344,6 +370,9 @@ def decide_trade(
             current_window_id=current_window_id,
             last_trade_window_id=last_trade_window_id,
             cfg=cfg,
+            trades_in_current_window=trades_in_current_window,
+            up_bid=up_bid,
+            down_bid=down_bid,
         )
     # fee_aware_model — signal generation requires market/orderbook data and
     # is handled by generate_signal() in bot.py; return NO_TRADE here so that

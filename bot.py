@@ -108,8 +108,10 @@ _running = True
 
 # ── Time-delay strategy state ─────────────────────────────────────────────────────────────────────
 # Tracks the window ID of the last trade placed in reddit_time_delay mode so that
-# MAX_TRADES_PER_WINDOW enforcement works across bot cycles.
+# window-change detection works across bot cycles.
 _last_trade_window_id: "str | None" = None
+# Number of entries placed in the current 15-minute window (reset when window changes).
+_trades_in_current_window: int = 0
 
 def _handle_signal(sig, frame):
     global _running
@@ -333,7 +335,7 @@ def _run_once_time_delay(
       4. Act on EXIT_POSITION (price-triggered stop-loss from strategy).
       5. Act on ENTER_YES / ENTER_NO (pass through risk manager first).
     """
-    global _last_trade_window_id
+    global _last_trade_window_id, _trades_in_current_window
 
     # 1. Safety exits first (stop-loss, take-profit, expiry — always active)
     exit_error = False
@@ -359,20 +361,30 @@ def _run_once_time_delay(
     minutes_to_expiry = _compute_minutes_to_expiry(market)
     current_window_id = _compute_window_id(market)
 
-    # Derive contract prices in dollars (0.0–1.0) from the market ask prices.
-    # Using the ask gives the realistic cost of entering a position.
+    # Reset per-window entry counter when the market window has rolled over.
+    if current_window_id != _last_trade_window_id:
+        _trades_in_current_window = 0
+
+    # Derive entry prices from ask (realistic cost to open a position)
+    # and exit prices from bid (the price we can realistically sell at).
     yes_ask_cents = market.get("yes_ask", 50)
     no_ask_cents = market.get("no_ask", 50)
-    up_price = float(yes_ask_cents) / 100.0
-    down_price = float(no_ask_cents) / 100.0
+    yes_bid_cents = market.get("yes_bid", 50)
+    no_bid_cents = market.get("no_bid", 50)
+    up_price = float(yes_ask_cents) / 100.0   # ask — used for entry trigger
+    down_price = float(no_ask_cents) / 100.0  # ask — used for entry trigger
+    up_bid = float(yes_bid_cents) / 100.0     # bid — used for stop-loss exit
+    down_bid = float(no_bid_cents) / 100.0    # bid — used for stop-loss exit
 
     # Determine whether this bot currently holds a YES or NO position
     bot_pos = risk.get_open_positions().get(ticker)
     current_position_side: "str | None" = bot_pos["side"].upper() if bot_pos else None
 
     log.info(
-        "time_delay | ticker=%s | up=%.2f down=%.2f | minutes_left=%d | position=%s",
-        ticker, up_price, down_price, minutes_to_expiry, current_position_side,
+        "time_delay | ticker=%s | up_ask=%.2f up_bid=%.2f | down_ask=%.2f down_bid=%.2f"
+        " | minutes_left=%d | position=%s | trades_in_window=%d",
+        ticker, up_price, up_bid, down_price, down_bid,
+        minutes_to_expiry, current_position_side, _trades_in_current_window,
     )
 
     # 3. Ask the strategy what to do
@@ -384,6 +396,9 @@ def _run_once_time_delay(
         current_window_id=current_window_id,
         last_trade_window_id=_last_trade_window_id,
         cfg=config,
+        trades_in_current_window=_trades_in_current_window,
+        up_bid=up_bid,
+        down_bid=down_bid,
     )
 
     log.debug("time_delay decide_trade → action=%s size=%s", action, size)
@@ -395,11 +410,8 @@ def _run_once_time_delay(
         entry_price = bot_pos["entry_price"]
         current_price = market.get(f"{side}_bid", entry_price)
         exit_price_order = max(1, current_price - 1)
-        pnl_cents = (
-            (exit_price_order - entry_price) * count
-            if side == "yes"
-            else (entry_price - exit_price_order) * count
-        )
+        # PnL = (sell price - buy price) × contracts — same for YES and NO
+        pnl_cents = (exit_price_order - entry_price) * count
         log.warning(
             "EXIT(time_delay) %s | side=%s | entry=%dc | exit=%dc | pnl=%+dc",
             ticker, side, entry_price, exit_price_order, pnl_cents,
@@ -476,6 +488,7 @@ def _run_once_time_delay(
     risk.record_open_position(ticker, side, contracts, sig_stub.price_cents)
     risk.log_entry_trade(ticker, side, contracts, sig_stub.price_cents)
     _last_trade_window_id = current_window_id
+    _trades_in_current_window += 1
     log.debug("time_delay order id: %s", order_id)
     return True
 

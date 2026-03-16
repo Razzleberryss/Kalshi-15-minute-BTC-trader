@@ -247,7 +247,7 @@ if __name__ == "__main__":
     log.info("STRATEGY_MODE         : %s", STRATEGY_MODE)
     log.info("TRIGGER_POINT_PRICE   : %.2f", TRIGGER_POINT_PRICE)
     log.info("EXIT_POINT_PRICE      : %.2f", EXIT_POINT_PRICE)
-    log.info("TRIGGER_MIN_REMAINING : %d", TRIGGER_MINUTE_REMAINING)
+    log.info("TRIGGER_MINUTE_REMAINING : %d", TRIGGER_MINUTE_REMAINING)
     log.info("MAX_TRADES_PER_WINDOW : %d", MAX_TRADES_PER_WINDOW)
     try:
         validate()
