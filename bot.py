@@ -20,6 +20,7 @@ import signal
 import sys
 import time
 import datetime
+import unittest
 
 import colorlog
 
@@ -27,6 +28,36 @@ import config
 from kalshi_client import KalshiClient
 from risk_manager import RiskManager
 from strategy import generate_signal
+
+
+def _compute_trade_contracts(sig_size, budget_contracts):
+    """
+    Return the number of contracts to trade, capped by the risk budget.
+
+    This is a thin wrapper around ``min(sig_size, budget_contracts)`` so that
+    trade sizing semantics are covered by unit tests and protected from
+    regressions if the sizing logic is modified in the future.
+    """
+    return min(sig_size, budget_contracts)
+
+
+class TestComputeTradeContracts(unittest.TestCase):
+    """
+    Unit tests for trade sizing semantics.
+
+    Ensures that contract sizing respects the cap of
+    ``min(sig.size, budget_contracts)`` both when the signal size is below and
+    above the available budget.
+    """
+
+    def test_sig_size_smaller_than_budget(self):
+        # When the signal size is below the budget, we should trade the full signal size.
+        self.assertEqual(_compute_trade_contracts(5, 10), 5)
+
+    def test_sig_size_larger_than_budget(self):
+        # When the signal size exceeds the budget, we should be capped by the budget.
+        self.assertEqual(_compute_trade_contracts(20, 10), 10)
+
 
 # ── Logging setup ──────────────────────────────────────────────────────────────────────────────
 def setup_logging():
@@ -211,7 +242,7 @@ def run_once(client: KalshiClient, risk: RiskManager):
     # decide_trade already computed an edge-based size (sig.size); cap it by the
     # dollar budget so existing risk limits are always respected.
     budget_contracts = risk.calculate_contracts(sig.price_cents)
-    contracts = min(sig.size, budget_contracts)
+    contracts = _compute_trade_contracts(sig.size, budget_contracts)
     if contracts < 1:
         log.warning("Contract count is 0 — price too high for budget. Skipping.")
         return False
