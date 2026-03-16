@@ -206,7 +206,10 @@ def run_once(client: KalshiClient, risk: RiskManager):
         return False
 
     # 6. Size the trade
-    contracts = risk.calculate_contracts(sig.price_cents)
+    # decide_trade already computed an edge-based size (sig.size); cap it by the
+    # dollar budget so existing risk limits are always respected.
+    budget_contracts = risk.calculate_contracts(sig.price_cents)
+    contracts = min(sig.size, budget_contracts)
     if contracts < 1:
         log.warning("Contract count is 0 — price too high for budget. Skipping.")
         return False

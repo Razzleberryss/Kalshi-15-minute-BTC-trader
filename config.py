@@ -69,6 +69,31 @@ MOMENTUM_LOOKBACK_BARS: int = int(os.getenv("MOMENTUM_LOOKBACK_BARS", "5"))
 MIN_EDGE_THRESHOLD: float = float(os.getenv("MIN_EDGE_THRESHOLD", "0.05"))
 
 # =============================================================================
+# Fee-Aware Entry Parameters
+# =============================================================================
+# Minimum probability mispricing (in percentage points) required to place a
+# trade.  E.g. 0.10 means model must be at least 10 pp above/below market.
+MIN_EDGE_PCT: float = float(os.getenv("MIN_EDGE_PCT", "0.10"))
+
+# Forbidden price band: skip entry when the YES price is in this range.
+# Fees bite hardest near 0.50, so the default excludes the 0.30–0.70 region.
+FORBIDDEN_PRICE_LOW: float = float(os.getenv("FORBIDDEN_PRICE_LOW", "0.30"))
+FORBIDDEN_PRICE_HIGH: float = float(os.getenv("FORBIDDEN_PRICE_HIGH", "0.70"))
+
+# Minimum expected net value per contract after fees (in dollars).
+# E.g. 0.02 = at least 2 cents of edge after paying open + close fees.
+MIN_EXPECTED_NET_PER_CONTRACT: float = float(
+    os.getenv("MIN_EXPECTED_NET_PER_CONTRACT", "0.02")
+)
+
+# Position-sizing bounds (in contracts) for the edge-based dynamic sizer.
+BASE_SIZE: int = int(os.getenv("BASE_SIZE", "1"))
+MAX_SIZE: int = int(os.getenv("MAX_SIZE", "10"))
+
+# At this mispricing level (and above) the sizer uses MAX_SIZE contracts.
+MAX_EDGE_PCT: float = float(os.getenv("MAX_EDGE_PCT", "0.30"))
+
+# =============================================================================
 # API Client
 # =============================================================================
 # Per-request timeout in seconds
@@ -129,6 +154,22 @@ def validate() -> None:
         errors.append("MOMENTUM_LOOKBACK_BARS must be >= 1")
     if not (0.0 < MIN_EDGE_THRESHOLD < 1.0):
         errors.append("MIN_EDGE_THRESHOLD must be between 0 and 1")
+    if not (0.0 < MIN_EDGE_PCT < 1.0):
+        errors.append("MIN_EDGE_PCT must be between 0 and 1")
+    if not (0.0 <= FORBIDDEN_PRICE_LOW < FORBIDDEN_PRICE_HIGH <= 1.0):
+        errors.append(
+            "FORBIDDEN_PRICE_LOW must be >= 0, < FORBIDDEN_PRICE_HIGH, and FORBIDDEN_PRICE_HIGH <= 1"
+        )
+    if MIN_EXPECTED_NET_PER_CONTRACT < 0:
+        errors.append("MIN_EXPECTED_NET_PER_CONTRACT must be >= 0")
+    if BASE_SIZE < 1:
+        errors.append("BASE_SIZE must be >= 1")
+    if MAX_SIZE < BASE_SIZE:
+        errors.append("MAX_SIZE must be >= BASE_SIZE")
+    if not (0.0 < MAX_EDGE_PCT <= 1.0):
+        errors.append("MAX_EDGE_PCT must be between 0 (exclusive) and 1 (inclusive)")
+    if MAX_EDGE_PCT <= MIN_EDGE_PCT:
+        errors.append("MAX_EDGE_PCT must be > MIN_EDGE_PCT")
     if REQUEST_TIMEOUT_SECONDS < 1:
         errors.append("REQUEST_TIMEOUT_SECONDS must be >= 1")
     if REQUEST_MAX_RETRIES < 0:
@@ -161,6 +202,11 @@ if __name__ == "__main__":
     log.info("STOP_LOSS_CENTS       : %sc", STOP_LOSS_CENTS)
     log.info("TAKE_PROFIT_CENTS     : %sc", TAKE_PROFIT_CENTS)
     log.info("SIGNAL_REVERSAL_EXIT  : %s", SIGNAL_REVERSAL_EXIT)
+    log.info("MIN_EDGE_PCT          : %.2f", MIN_EDGE_PCT)
+    log.info("FORBIDDEN_PRICE_BAND  : %.2f – %.2f", FORBIDDEN_PRICE_LOW, FORBIDDEN_PRICE_HIGH)
+    log.info("MIN_EV_NET/CONTRACT   : $%.3f", MIN_EXPECTED_NET_PER_CONTRACT)
+    log.info("BASE_SIZE / MAX_SIZE  : %d / %d", BASE_SIZE, MAX_SIZE)
+    log.info("MAX_EDGE_PCT          : %.2f", MAX_EDGE_PCT)
     log.info("LOOP_INTERVAL_SECONDS : %ss", LOOP_INTERVAL_SECONDS)
     log.info("EXPIRY_EXIT_SECONDS   : %ss", EXPIRY_EXIT_SECONDS)
     log.info("REQUEST_TIMEOUT_SECS  : %ss", REQUEST_TIMEOUT_SECONDS)
