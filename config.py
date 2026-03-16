@@ -58,6 +58,24 @@ TAKE_PROFIT_CENTS: int = int(os.getenv("TAKE_PROFIT_CENTS", "30"))
 SIGNAL_REVERSAL_EXIT: bool = os.getenv("SIGNAL_REVERSAL_EXIT", "true").lower() == "true"
 
 # =============================================================================
+# Strategy Mode
+# =============================================================================
+# Which strategy to use. Allowed values:
+#   "fee_aware_model"   – the default momentum + fee-aware model strategy
+#   "reddit_time_delay" – time-delay + price-trigger strategy
+STRATEGY_MODE: str = os.getenv("STRATEGY_MODE", "fee_aware_model")
+
+# reddit_time_delay parameters
+# Price (0.0–1.0, i.e. dollars) that the winning side must reach to trigger entry.
+TRIGGER_POINT_PRICE: float = float(os.getenv("TRIGGER_POINT_PRICE", "0.90"))
+# Price (0.0–1.0) at which an open position is exited early (stop-loss reversal).
+EXIT_POINT_PRICE: float = float(os.getenv("EXIT_POINT_PRICE", "0.40"))
+# Only arm the strategy when this many minutes (or fewer) remain before expiry.
+TRIGGER_MINUTE_REMAINING: int = int(os.getenv("TRIGGER_MINUTE_REMAINING", "14"))
+# Maximum number of entries allowed per 15-minute window (set 1 to allow only one entry).
+MAX_TRADES_PER_WINDOW: int = int(os.getenv("MAX_TRADES_PER_WINDOW", "1"))
+
+# =============================================================================
 # Strategy / Signal
 # =============================================================================
 # BTC_SERIES_TICKER: Kalshi 15-min BTC Up/Down series.
@@ -180,6 +198,20 @@ def validate() -> None:
         errors.append("STOP_LOSS_CENTS must be >= 0")
     if TAKE_PROFIT_CENTS < 0:
         errors.append("TAKE_PROFIT_CENTS must be >= 0")
+    if STRATEGY_MODE not in ("fee_aware_model", "reddit_time_delay"):
+        errors.append(
+            f"STRATEGY_MODE must be 'fee_aware_model' or 'reddit_time_delay', got '{STRATEGY_MODE}'"
+        )
+    if not (0.0 < TRIGGER_POINT_PRICE <= 1.0):
+        errors.append("TRIGGER_POINT_PRICE must be between 0 (exclusive) and 1 (inclusive)")
+    if not (0.0 < EXIT_POINT_PRICE < TRIGGER_POINT_PRICE):
+        errors.append(
+            "EXIT_POINT_PRICE must be > 0 and < TRIGGER_POINT_PRICE"
+        )
+    if TRIGGER_MINUTE_REMAINING < 0:
+        errors.append("TRIGGER_MINUTE_REMAINING must be >= 0")
+    if MAX_TRADES_PER_WINDOW < 1:
+        errors.append("MAX_TRADES_PER_WINDOW must be >= 1")
     if errors:
         raise EnvironmentError(
             "Config validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
@@ -212,6 +244,11 @@ if __name__ == "__main__":
     log.info("REQUEST_TIMEOUT_SECS  : %ss", REQUEST_TIMEOUT_SECONDS)
     log.info("REQUEST_MAX_RETRIES   : %s", REQUEST_MAX_RETRIES)
     log.info("TRADE_LOG_FILE        : %s", TRADE_LOG_FILE)
+    log.info("STRATEGY_MODE         : %s", STRATEGY_MODE)
+    log.info("TRIGGER_POINT_PRICE   : %.2f", TRIGGER_POINT_PRICE)
+    log.info("EXIT_POINT_PRICE      : %.2f", EXIT_POINT_PRICE)
+    log.info("TRIGGER_MINUTE_REMAINING : %d", TRIGGER_MINUTE_REMAINING)
+    log.info("MAX_TRADES_PER_WINDOW : %d", MAX_TRADES_PER_WINDOW)
     try:
         validate()
         log.info("\nConfig validation: PASSED")

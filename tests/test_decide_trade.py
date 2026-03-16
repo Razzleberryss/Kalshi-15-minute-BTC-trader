@@ -16,7 +16,7 @@ import types
 import unittest
 
 import config
-from strategy import decide_trade
+from strategy import decide_trade_fee_aware as decide_trade
 
 
 def _make_cfg(

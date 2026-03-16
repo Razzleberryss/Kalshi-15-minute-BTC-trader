@@ -115,7 +115,7 @@ def suggest_limit_price(market: dict, side: str) -> int:
     return max(config.MIN_CONTRACT_PRICE_CENTS, min(config.MAX_CONTRACT_PRICE_CENTS, price))
 
 
-def decide_trade(
+def decide_trade_fee_aware(
     market_price: float,
     model_p_yes: float,
     side_allowed_flags: Optional[dict] = None,
@@ -241,6 +241,146 @@ def decide_trade(
     return action, C
 
 
+def decide_trade_time_delay(
+    up_price: float,
+    down_price: float,
+    minutes_to_expiry: int,
+    current_position_side: "str | None",
+    current_window_id: str,
+    last_trade_window_id: "str | None",
+    cfg,
+    trades_in_current_window: int = 0,
+    up_bid: "float | None" = None,
+    down_bid: "float | None" = None,
+) -> tuple[str, "int | None"]:
+    """
+    Reddit-style "time delay + stop-loss" entry/exit decision.
+
+    Returns one of:
+      ("ENTER_YES", size)     – buy YES contracts
+      ("ENTER_NO", size)      – buy NO contracts
+      ("EXIT_POSITION", None) – exit the current open position
+      ("NO_TRADE", None)      – do nothing this cycle
+
+    Parameters
+    ----------
+    up_price : float
+        Current YES ask price in dollars (0.0–1.0).  Used for entry checks.
+    down_price : float
+        Current NO ask price in dollars (0.0–1.0).  Used for entry checks.
+    minutes_to_expiry : int
+        Minutes remaining until the 15-minute window closes.
+    current_position_side : str | None
+        "YES", "NO", or None (no open position this window).
+    current_window_id : str
+        Stable identifier for the current 15-minute window.
+    last_trade_window_id : str | None
+        Window ID of the most recent entry placed by this bot.
+    cfg : module or SimpleNamespace
+        Config object supplying TRIGGER_POINT_PRICE, EXIT_POINT_PRICE,
+        TRIGGER_MINUTE_REMAINING, MAX_TRADES_PER_WINDOW, and BASE_SIZE.
+    trades_in_current_window : int, optional
+        Number of entries already placed in the current window.  Resets to 0
+        when the window ID changes.  Default is 0.
+    up_bid : float | None, optional
+        Current YES bid price in dollars.  When provided, used for the YES
+        stop-loss exit check instead of ``up_price``.  Defaults to ``up_price``.
+    down_bid : float | None, optional
+        Current NO bid price in dollars.  When provided, used for the NO
+        stop-loss exit check instead of ``down_price``.  Defaults to ``down_price``.
+    """
+    trigger = cfg.TRIGGER_POINT_PRICE
+    exit_point_price = cfg.EXIT_POINT_PRICE
+    trigger_minutes = cfg.TRIGGER_MINUTE_REMAINING
+    max_trades = cfg.MAX_TRADES_PER_WINDOW
+    size = cfg.BASE_SIZE
+
+    # Use bid prices for exit comparisons (the price we can actually sell at);
+    # fall back to the ask prices when bid data is not available.
+    _exit_up = up_bid if up_bid is not None else up_price
+    _exit_down = down_bid if down_bid is not None else down_price
+
+    if current_position_side is None:
+        # Not yet armed — too much time left
+        if minutes_to_expiry > trigger_minutes:
+            return ("NO_TRADE", None)
+
+        # Already reached the per-window entry limit
+        if trades_in_current_window >= max_trades:
+            return ("NO_TRADE", None)
+
+        # Enter YES if only the UP side qualifies (using ask prices for entry)
+        if up_price >= trigger and down_price < trigger:
+            return ("ENTER_YES", size)
+
+        # Enter NO if only the DOWN side qualifies (using ask prices for entry)
+        if down_price >= trigger and up_price < trigger:
+            return ("ENTER_NO", size)
+
+        # Both or neither qualify — stay out
+        return ("NO_TRADE", None)
+
+    elif current_position_side == "YES":
+        # Stop-loss check uses bid price (the price we can exit at)
+        if _exit_up <= exit_point_price:
+            return ("EXIT_POSITION", None)
+        return ("NO_TRADE", None)
+
+    elif current_position_side == "NO":
+        # Stop-loss check uses bid price (the price we can exit at)
+        if _exit_down <= exit_point_price:
+            return ("EXIT_POSITION", None)
+        return ("NO_TRADE", None)
+
+    else:
+        # Unexpected / invalid position side — do nothing safely
+        return ("NO_TRADE", None)
+
+
+def decide_trade(
+    up_price: float,
+    down_price: float,
+    minutes_to_expiry: int,
+    current_position_side: "str | None",
+    current_window_id: str,
+    last_trade_window_id: "str | None",
+    cfg,
+    trades_in_current_window: int = 0,
+    up_bid: "float | None" = None,
+    down_bid: "float | None" = None,
+) -> tuple[str, "int | None"]:
+    """
+    Strategy-mode router.  Delegates to the appropriate strategy function
+    based on ``cfg.STRATEGY_MODE``.
+
+    Returns the same tuple shape as :func:`decide_trade_time_delay`:
+      ("ENTER_YES" | "ENTER_NO" | "EXIT_POSITION" | "NO_TRADE", size | None)
+
+    For ``fee_aware_model`` mode this wrapper is not the primary entry point
+    (bot.py uses :func:`generate_signal` directly); it is included here so
+    that any future caller can route through a single function regardless of
+    mode.
+    """
+    if cfg.STRATEGY_MODE == "reddit_time_delay":
+        return decide_trade_time_delay(
+            up_price=up_price,
+            down_price=down_price,
+            minutes_to_expiry=minutes_to_expiry,
+            current_position_side=current_position_side,
+            current_window_id=current_window_id,
+            last_trade_window_id=last_trade_window_id,
+            cfg=cfg,
+            trades_in_current_window=trades_in_current_window,
+            up_bid=up_bid,
+            down_bid=down_bid,
+        )
+    # fee_aware_model — signal generation requires market/orderbook data and
+    # is handled by generate_signal() in bot.py; return NO_TRADE here so that
+    # callers that go through this wrapper for the fee-aware path do not place
+    # duplicate orders.
+    return ("NO_TRADE", None)
+
+
 def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
     """
     Main entry point.  Returns a Signal or None if no trade warranted.
@@ -250,12 +390,13 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
       - Kalshi orderbook skew    (weight 0.4)
 
     The composite score is mapped to a model_p_yes probability and passed
-    through decide_trade(), which enforces fee-aware entry filters and
-    dynamic sizing before a Signal is emitted.
+    through decide_trade_fee_aware(), which enforces fee-aware entry filters
+    and dynamic sizing before a Signal is emitted.
 
-    A Signal with size=0 is returned when decide_trade blocks the entry but
-    a clear directional preference exists; manage_positions can still use
-    this for SIGNAL_REVERSAL_EXIT even though no new contract will be opened.
+    A Signal with size=0 is returned when decide_trade_fee_aware blocks the
+    entry but a clear directional preference exists; manage_positions can still
+    use this for SIGNAL_REVERSAL_EXIT even though no new contract will be
+    opened.
     Returns None only when momentum data is unavailable (no directional view).
     """
     momentum = get_btc_momentum()
@@ -308,7 +449,7 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
         entry_p = float(np.clip(1.0 - entry_price_cents / 100.0, 0.01, 0.99))
 
     # Fee-aware entry decision (handles edge threshold, forbidden bands, sizing)
-    action, size = decide_trade(entry_p, model_p_yes)
+    action, size = decide_trade_fee_aware(entry_p, model_p_yes)
 
     if action == "NO_TRADE":
         # Entry is blocked by fee/band filters.  Return a Signal with size=0 so
