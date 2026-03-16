@@ -236,6 +236,28 @@ class TestDecideTradeSideFlags(unittest.TestCase):
         self.assertEqual(action, "NO_TRADE")
         self.assertEqual(size, 0)
 
+    def test_yes_blocked_returns_no_trade_not_buy_no(self):
+        # When YES side is blocked, should not fall through to BUY_NO even if
+        # mispricing is in the YES direction.
+        action, size = decide_trade(
+            0.10, 0.25,
+            side_allowed_flags={"yes": False, "no": True},
+            cfg=self.cfg,
+        )
+        self.assertEqual(action, "NO_TRADE")
+        self.assertEqual(size, 0)
+
+    def test_no_blocked_returns_no_trade_not_buy_yes(self):
+        # When NO side is blocked, should not fall through to BUY_YES even if
+        # mispricing is in the NO direction.
+        action, size = decide_trade(
+            0.90, 0.75,
+            side_allowed_flags={"yes": True, "no": False},
+            cfg=self.cfg,
+        )
+        self.assertEqual(action, "NO_TRADE")
+        self.assertEqual(size, 0)
+
     def test_yes_allowed_when_only_yes_enabled(self):
         action, size = decide_trade(
             0.10, 0.25,

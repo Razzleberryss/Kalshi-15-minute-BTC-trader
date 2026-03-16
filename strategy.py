@@ -166,11 +166,25 @@ def decide_trade(
     market_p_yes = P  # YES price ≈ market-implied probability of YES
     mispricing = model_p_yes - market_p_yes
 
-    if mispricing >= cfg.MIN_EDGE_PCT and side_allowed_flags.get("yes", True):
+    if mispricing >= cfg.MIN_EDGE_PCT:
+        if not side_allowed_flags.get("yes", True):
+            log.debug(
+                "decide_trade: BUY_YES indicated (mispricing=%.4f) "
+                "but YES side is disabled by side_allowed_flags — NO_TRADE",
+                mispricing,
+            )
+            return "NO_TRADE", 0
         action = "BUY_YES"
         # Expected gross value per contract for buying YES
         ev_gross = model_p_yes * 1.0 - P
-    elif mispricing <= -cfg.MIN_EDGE_PCT and side_allowed_flags.get("no", True):
+    elif mispricing <= -cfg.MIN_EDGE_PCT:
+        if not side_allowed_flags.get("no", True):
+            log.debug(
+                "decide_trade: BUY_NO indicated (mispricing=%.4f) "
+                "but NO side is disabled by side_allowed_flags — NO_TRADE",
+                mispricing,
+            )
+            return "NO_TRADE", 0
         action = "BUY_NO"
         # Expected gross value per contract for buying NO
         # (pay 1-P for a NO contract, win 1.00 if outcome is NO)
@@ -198,7 +212,10 @@ def decide_trade(
     else:
         edge_ratio = 1.0
 
-    C = max(1, round(cfg.BASE_SIZE + edge_ratio * (cfg.MAX_SIZE - cfg.BASE_SIZE)))
+    # Use math.floor(x + 0.5) for half-up rounding instead of Python's built-in
+    # round(), which uses banker's rounding (round-half-to-even) and can cause
+    # non-monotonic sizing steps at exact half increments.
+    C = max(1, math.floor(cfg.BASE_SIZE + edge_ratio * (cfg.MAX_SIZE - cfg.BASE_SIZE) + 0.5))
 
     # ── 4. Fee and net EV check ────────────────────────────────────────────────
     # P_exit=0.5 is intentionally the worst-case (maximum-fee) assumption:
@@ -311,8 +328,24 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
             size=0,
         )
 
-    # Confirm side from the action (should match composite-derived side in normal cases)
-    side = "yes" if action == "BUY_YES" else "no"
+    # Guard: if decide_trade's action disagrees with the composite-derived side,
+    # entry_price_cents (computed for `side`) would be wrong for the opposite side.
+    # Treat the mismatch as NO_TRADE to avoid placing an order at an incorrect price.
+    action_side = "yes" if action == "BUY_YES" else "no"
+    if action_side != side:
+        log.info(
+            "decide_trade action (%s) disagrees with composite side (%s) "
+            "(composite=%.3f entry_p=%.2f model_p_yes=%.2f) — treating as NO_TRADE",
+            action_side, side, composite, entry_p, model_p_yes,
+        )
+        return Signal(
+            side=side,
+            confidence=confidence,
+            price_cents=entry_price_cents,
+            reason=f"NO_TRADE: side mismatch composite={composite:+.3f}",
+            size=0,
+        )
+
     reason = (
         f"momentum={momentum:+.3f} skew={skew:+.3f} composite={composite:+.3f} → "
         f"{side.upper()} @ {entry_price_cents}c (confidence={confidence:.2%} size={size})"
