@@ -31,8 +31,20 @@ class RiskManager:
         self._daily_realized_pnl_cents = 0
         # Tracks only positions opened by this bot instance (keyed by ticker)
         self._open_positions: dict[str, dict] = {}
+        # Cache for current datetime to reduce redundant calls
+        self._cached_now: Optional[datetime] = None
         self._ensure_log_file()
         self._load_daily_stats_from_log()
+
+    def _get_current_datetime(self) -> datetime:
+        """Get current datetime, cached within a single operation."""
+        if self._cached_now is None:
+            self._cached_now = datetime.now(timezone.utc)
+        return self._cached_now
+
+    def _clear_datetime_cache(self):
+        """Clear the datetime cache. Call at the end of each bot cycle."""
+        self._cached_now = None
 
     # ── Trade approval ───────────────────────────────────────────────────────────
 
@@ -47,8 +59,10 @@ class RiskManager:
         Returns (approved: bool, reason: str).
         Gates the trade against all risk limits.
         """
-        # 1. Already have a position in this market (opened by this bot)?
+        # 1. Reset daily stats once per cycle (not on every call)
         self._reset_daily_if_needed()
+
+        # 2. Already have a position in this market (opened by this bot)?
         if market_ticker in self._open_positions:
             return False, f"Already have a position in {market_ticker}"
 
@@ -115,10 +129,10 @@ class RiskManager:
         size: int,
         entry_price: int,
     ) -> None:
-        self._reset_daily_if_needed()
+        # Daily count increment (reset already done in approve_trade)
         self._daily_trade_count += 1
         row = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": self._get_current_datetime().isoformat(),
             "market": market,
             "side": side.upper(),
             "size": size,
@@ -139,10 +153,10 @@ class RiskManager:
         exit_reason: str,
     ) -> int:
         pnl_cents = (exit_price - entry_price) * size if side.lower() == "yes" else (entry_price - exit_price) * size
-        self._reset_daily_if_needed()
+        # PnL update (reset not needed here, done once per cycle)
         self._daily_realized_pnl_cents += pnl_cents
         row = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": self._get_current_datetime().isoformat(),
             "market": market,
             "side": side.upper(),
             "size": size,
@@ -168,21 +182,48 @@ class RiskManager:
             self._daily_realized_pnl_cents = 0
 
     def _load_daily_stats_from_log(self) -> None:
+        """Load today's trade stats from CSV log. Optimized to read only recent entries."""
         if not os.path.exists(config.TRADE_LOG_FILE):
             return
         try:
             today_iso = self._today.isoformat()
-            with open(config.TRADE_LOG_FILE, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    ts = row.get("timestamp", "")
-                    if not ts.startswith(today_iso):
-                        continue
-                    if row.get("exit_reason") == "entry":
-                        self._daily_trade_count += 1
-                    pnl_str = row.get("pnl", "")
-                    if pnl_str not in ("", None):
-                        self._daily_realized_pnl_cents += int(float(pnl_str))
+
+            # For small files, read all. For large files (>1000 lines), read only last 500 lines
+            # since today's trades are likely at the end
+            with open(config.TRADE_LOG_FILE, "rb") as f:
+                # Get file size
+                f.seek(0, 2)  # Seek to end
+                file_size = f.tell()
+
+                # If file is small (<50KB), read all lines normally
+                if file_size < 50000:
+                    f.seek(0)
+                    lines = f.read().decode("utf-8").splitlines()
+                else:
+                    # For large files, read last ~500 lines (approximate)
+                    # Average line length ~100 bytes, so read last 50KB
+                    f.seek(max(0, file_size - 50000))
+                    partial = f.read().decode("utf-8")
+                    # Skip first incomplete line
+                    lines = partial.split("\n", 1)[-1].splitlines()
+
+            # Parse CSV from lines
+            if not lines:
+                return
+
+            import io
+            csv_content = "\n".join(lines)
+            reader = csv.DictReader(io.StringIO(csv_content))
+
+            for row in reader:
+                ts = row.get("timestamp", "")
+                if not ts.startswith(today_iso):
+                    continue
+                if row.get("exit_reason") == "entry":
+                    self._daily_trade_count += 1
+                pnl_str = row.get("pnl", "")
+                if pnl_str not in ("", None):
+                    self._daily_realized_pnl_cents += int(float(pnl_str))
         except Exception as exc:
             log.warning("Unable to load daily stats from trade log: %s", exc)
 
