@@ -61,13 +61,26 @@ class TestComputeTradeContracts(unittest.TestCase):
 
 # ── Time-delay strategy helpers ───────────────────────────────────────────────────────────────
 
+# Cache for parsed datetime to avoid redundant parsing in position management
+_parsed_datetime_cache: dict = {}
+
+
+def _parse_close_time(close_time_str: str) -> datetime.datetime:
+    """Parse ISO datetime string and cache result to avoid redundant parsing."""
+    if close_time_str not in _parsed_datetime_cache:
+        _parsed_datetime_cache[close_time_str] = datetime.datetime.fromisoformat(
+            close_time_str.replace("Z", "+00:00")
+        )
+    return _parsed_datetime_cache[close_time_str]
+
+
 def _compute_minutes_to_expiry(market: dict) -> int:
     """Return whole minutes remaining until market close_time, or 999 if unknown."""
     close_time_str = market.get("close_time")
     if not close_time_str:
         return 999
     try:
-        close_time = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+        close_time = _parse_close_time(close_time_str)
         now = datetime.datetime.now(datetime.timezone.utc)
         seconds = max(0.0, (close_time - now).total_seconds())
         return int(seconds // 60)
@@ -165,9 +178,7 @@ def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, curr
         close_time_str = market.get("close_time")
         if close_time_str:
             try:
-                close_time = datetime.datetime.fromisoformat(
-                    close_time_str.replace("Z", "+00:00")
-                )
+                close_time = _parse_close_time(close_time_str)
                 now = datetime.datetime.now(datetime.timezone.utc)
                 if (close_time - now).total_seconds() <= config.EXPIRY_EXIT_SECONDS:
                     exit_reason = "expiry"
@@ -213,14 +224,16 @@ def run_once(client: KalshiClient, risk: RiskManager):
     market = client.get_active_btc_market()
     if not market:
         log.warning("No active BTC 15-min market found. Skipping cycle.")
+        risk._clear_datetime_cache()
         return False
 
     ticker = market["ticker"]
     if not ticker.startswith(f"{config.BTC_SERIES_TICKER}-"):
         log.error("Refusing non-BTC-series market: %s", ticker)
+        risk._clear_datetime_cache()
         return False
-    log.info("Active market: %s | last=%sc yes=%s/%s no=%s/%s", 
-             ticker, market.get("last_price"), 
+    log.info("Active market: %s | last=%sc yes=%s/%s no=%s/%s",
+             ticker, market.get("last_price"),
              market.get("yes_bid"), market.get("yes_ask"),
              market.get("no_bid"), market.get("no_ask"))
 
@@ -231,6 +244,7 @@ def run_once(client: KalshiClient, risk: RiskManager):
         positions = client.get_positions()
     except Exception as exc:
         log.error("API fetch error: %s", exc)
+        risk._clear_datetime_cache()
         return False
 
     # ── reddit_time_delay strategy path ───────────────────────────────────────
@@ -262,6 +276,7 @@ def run_once(client: KalshiClient, risk: RiskManager):
     # If position management failed, skip new entries to avoid trading with
     # unrecorded/un-exited positions.
     if exit_error:
+        risk._clear_datetime_cache()
         return False
 
     # 5. Risk check for NEW trade
@@ -269,6 +284,7 @@ def run_once(client: KalshiClient, risk: RiskManager):
     # filters) but still returned a directional Signal for reversal-exit
     # purposes; skip entry.
     if sig is None or sig.size == 0:
+        risk._clear_datetime_cache()
         return False
         
     approved, reason = risk.approve_trade(sig, balance, positions, ticker)
@@ -276,6 +292,7 @@ def run_once(client: KalshiClient, risk: RiskManager):
         # Don't log "Already have position" as an error, it's normal if we didn't exit
         if "Already have" not in reason:
             log.info("New trade rejected by risk manager: %s", reason)
+        risk._clear_datetime_cache()
         return False
 
     # 6. Size the trade
@@ -285,6 +302,7 @@ def run_once(client: KalshiClient, risk: RiskManager):
     contracts = _compute_trade_contracts(sig.size, budget_contracts)
     if contracts < 1:
         log.warning("Contract count is 0 — price too high for budget. Skipping.")
+        risk._clear_datetime_cache()
         return False
 
     log.info(
@@ -314,6 +332,9 @@ def run_once(client: KalshiClient, risk: RiskManager):
     risk.record_open_position(ticker, sig.side, contracts, sig.price_cents)
     risk.log_entry_trade(ticker, sig.side, contracts, sig.price_cents)
     log.debug("Order id: %s", order_id)
+
+    # Clear datetime cache at end of cycle
+    risk._clear_datetime_cache()
     return True
 
 
@@ -436,6 +457,7 @@ def _run_once_time_delay(
 
     # 5. Handle new entries
     if action not in ("ENTER_YES", "ENTER_NO"):
+        risk._clear_datetime_cache()
         return False
 
     side = "yes" if action == "ENTER_YES" else "no"
@@ -455,12 +477,14 @@ def _run_once_time_delay(
     if not approved:
         if "Already have" not in reason:
             log.info("time_delay trade rejected by risk manager: %s", reason)
+        risk._clear_datetime_cache()
         return False
 
     budget_contracts = risk.calculate_contracts(sig_stub.price_cents)
     contracts = _compute_trade_contracts(sig_stub.size, budget_contracts)
     if contracts < 1:
         log.warning("time_delay: contract count is 0 — price too high for budget. Skipping.")
+        risk._clear_datetime_cache()
         return False
 
     log.info(
@@ -490,6 +514,9 @@ def _run_once_time_delay(
     _last_trade_window_id = current_window_id
     _trades_in_current_window += 1
     log.debug("time_delay order id: %s", order_id)
+
+    # Clear datetime cache at end of cycle
+    risk._clear_datetime_cache()
     return True
 
 def main():

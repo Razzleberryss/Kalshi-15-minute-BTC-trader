@@ -17,6 +17,8 @@ import time
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -34,6 +36,20 @@ class KalshiClient:
         self._private_key = self._load_private_key(config.KALSHI_PRIVATE_KEY_PATH)
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+
+        # Configure HTTP connection pooling for better performance
+        # Pool connections to reduce TCP handshake overhead
+        retry_strategy = Retry(
+            total=0,  # We handle retries manually in _request()
+            status_forcelist=[],
+        )
+        adapter = HTTPAdapter(
+            pool_connections=10,  # Number of connection pools to cache
+            pool_maxsize=20,      # Max connections in each pool
+            max_retries=retry_strategy,
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     # ── Auth helpers ──────────────────────────────────────────────────────────────────────────
     @staticmethod

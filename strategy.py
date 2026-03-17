@@ -17,6 +17,7 @@ you can expand with ML, cross-market arb, etc. later.
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -26,6 +27,9 @@ import yfinance as yf
 import config
 
 log = logging.getLogger(__name__)
+
+# Cache for BTC momentum data to avoid redundant yfinance API calls
+_btc_momentum_cache: dict = {"data": None, "timestamp": 0, "ttl": 60}
 
 
 @dataclass
@@ -44,7 +48,18 @@ def get_btc_momentum() -> Optional[float]:
       > 0  => bullish (BTC trending up)
       < 0  => bearish (BTC trending down)
     Returns None on data error.
+
+    Uses a 60-second cache to avoid redundant yfinance API calls on every bot cycle.
     """
+    global _btc_momentum_cache
+
+    # Check if cached data is still valid
+    now = time.time()
+    if (_btc_momentum_cache["data"] is not None and
+        now - _btc_momentum_cache["timestamp"] < _btc_momentum_cache["ttl"]):
+        log.debug("Using cached BTC momentum: %.4f", _btc_momentum_cache["data"])
+        return _btc_momentum_cache["data"]
+
     try:
         ticker = yf.Ticker(config.BTC_TICKER)
         # Grab last 30 minutes of 1-min bars
@@ -63,6 +78,11 @@ def get_btc_momentum() -> Optional[float]:
         pct_change = (recent[-1] - baseline) / baseline  # e.g. 0.003 = +0.3%
         # Normalize: clip to [-2%, +2%] range then scale to [-1, 1]
         momentum = float(np.clip(pct_change / 0.02, -1.0, 1.0))
+
+        # Cache the result
+        _btc_momentum_cache["data"] = momentum
+        _btc_momentum_cache["timestamp"] = now
+
         log.debug("BTC momentum: %.4f (raw pct_change=%.4f%%)", momentum, pct_change * 100)
         return momentum
     except Exception as exc:
@@ -78,10 +98,12 @@ def get_orderbook_skew(orderbook: dict) -> float:
       < 0  => more NO bids  (market leans NO)
     """
     try:
-        yes_bids = orderbook.get("orderbook", {}).get("yes", [])
-        no_bids = orderbook.get("orderbook", {}).get("no", [])
+        orderbook_data = orderbook.get("orderbook", {})
+        yes_bids = orderbook_data.get("yes", [])
+        no_bids = orderbook_data.get("no", [])
 
         # Each entry is [price_cents, size]
+        # Calculate liquidity weighted by price * size
         yes_liquidity = sum(p * s for p, s in yes_bids) if yes_bids else 0
         no_liquidity = sum(p * s for p, s in no_bids) if no_bids else 0
         total = yes_liquidity + no_liquidity
