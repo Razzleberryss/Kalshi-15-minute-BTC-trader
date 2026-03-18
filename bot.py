@@ -239,6 +239,68 @@ def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, curr
         }
 
 # ── Core bot loop ─────────────────────────────────────────────────────────────────────────────
+def _quotes_from_orderbook(orderbook: dict) -> dict:
+    """
+    Derive best bid/ask quotes and a mid price from a Kalshi orderbook dict.
+
+    This avoids making a second /orderbook (or equivalent) API call when we
+    already have the raw orderbook data.
+    """
+    # Default structure in case the orderbook is missing or empty
+    result = {
+        "best_yes_bid": None,
+        "best_yes_ask": None,
+        "best_no_bid": None,
+        "best_no_ask": None,
+        "mid_price": None,
+    }
+
+    if not isinstance(orderbook, dict):
+        return result
+
+    try:
+        yes_book = orderbook.get("yes", {}) or {}
+        no_book = orderbook.get("no", {}) or {}
+
+        yes_bids = yes_book.get("bids") or []
+        yes_asks = yes_book.get("asks") or []
+        no_bids = no_book.get("bids") or []
+        no_asks = no_book.get("asks") or []
+
+        def _best_price(entries):
+            if not entries:
+                return None
+            top = entries[0]
+            # Entries are expected to be dicts with a "price" field
+            return top.get("price") if isinstance(top, dict) else None
+
+        result["best_yes_bid"] = _best_price(yes_bids)
+        result["best_yes_ask"] = _best_price(yes_asks)
+        result["best_no_bid"] = _best_price(no_bids)
+        result["best_no_ask"] = _best_price(no_asks)
+
+        prices = [
+            p
+            for p in (
+                result["best_yes_bid"],
+                result["best_yes_ask"],
+                result["best_no_bid"],
+                result["best_no_ask"],
+            )
+            if p is not None
+        ]
+        if prices:
+            # Use a simple average of available best prices as a robust mid.
+            avg = sum(prices) / len(prices)
+            # Keep type consistent with existing prices (typically integer cents)
+            result["mid_price"] = round(avg)
+    except Exception:
+        # On any unexpected structure, fall back to defaults (all None)
+        return result
+
+    return result
+
+
 def run_once(client: KalshiClient, risk: RiskManager):
     """
     Execute one complete bot cycle.
@@ -271,7 +333,9 @@ def run_once(client: KalshiClient, risk: RiskManager):
 
     # 2b. Populate market dict with orderbook-based quotes if enabled
     if config.USE_ORDERBOOK_PRICES:
-        quotes = client.get_market_quotes(ticker)
+        # Derive quotes directly from the already-fetched orderbook to avoid
+        # an extra network call and potential rate-limit pressure.
+        quotes = _quotes_from_orderbook(orderbook)
         # Merge quotes into market dict, using new field names (best_yes_bid, etc.)
         market.update(quotes)
 
