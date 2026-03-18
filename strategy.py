@@ -446,24 +446,52 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
         composite, momentum, skew, confidence,
     )
 
+    # Apply MIN_CONFIDENCE filter: skip if signal is too weak
+    if confidence < config.MIN_CONFIDENCE:
+        log.info(
+            "Signal confidence %.4f below MIN_CONFIDENCE threshold %.4f — skipping cycle",
+            confidence, config.MIN_CONFIDENCE
+        )
+        return None
+
     # Determine directional preference from composite.  This is set early so it
     # is available for the NO_TRADE path (reversal signal with size=0).
     side = "yes" if composite > 0 else "no"
 
     # Market mid is used solely to anchor model_p_yes (independent of spread).
-    yes_bid = market.get("yes_bid", 50)
-    yes_ask = market.get("yes_ask", 50)
+    # If yes_bid or yes_ask is missing, skip this cycle entirely instead of defaulting to 50c
     if "yes_bid" not in market or "yes_ask" not in market:
         log.warning(
-            "Market data missing yes_bid/yes_ask — defaulting to 50c mid price; "
-            "decide_trade will apply configured price-band filters to this default"
+            "Market data missing yes_bid/yes_ask — skipping cycle (no quotes available)"
         )
+        return None
+
+    yes_bid = market.get("yes_bid")
+    yes_ask = market.get("yes_ask")
     market_mid = float(np.clip((yes_bid + yes_ask) / 2 / 100.0, 0.01, 0.99))
+
+    # Apply MAX_SLIPPAGE filter: skip if spread is too wide
+    spread = (yes_ask - yes_bid) / 100.0
+    if spread > config.MAX_SLIPPAGE:
+        log.info(
+            "Market spread %.4f exceeds MAX_SLIPPAGE threshold %.4f — skipping cycle",
+            spread, config.MAX_SLIPPAGE
+        )
+        return None
 
     # Map composite score to a model probability estimate.
     # A composite of ±1.0 shifts the market price by up to ±0.50,
     # so at MIN_EDGE_PCT=0.10 a composite of 0.20 is the minimum qualifying signal.
     model_p_yes = float(np.clip(market_mid + composite * 0.5, 0.01, 0.99))
+
+    # Apply MAX_PRICE_DEVIATION filter: skip if model deviates too far from market
+    price_deviation = abs(model_p_yes - market_mid)
+    if price_deviation > config.MAX_PRICE_DEVIATION:
+        log.info(
+            "Price deviation %.4f exceeds MAX_PRICE_DEVIATION threshold %.4f — skipping cycle",
+            price_deviation, config.MAX_PRICE_DEVIATION
+        )
+        return None
 
     # Use the side-specific suggested entry price (what the bot actually pays)
     # rather than the mid, so that decide_trade's mispricing and fee/EV checks
