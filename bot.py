@@ -337,14 +337,18 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
             # Try to get orderbook from WebSocket
             ws_orderbook = ws_client.get_latest_orderbook(ticker)
             if ws_orderbook:
-                # Wrap in same format as REST API response
-                orderbook = {"orderbook": ws_orderbook}
-                log.debug("Using WebSocket orderbook for %s", ticker)
+                # Ensure the WebSocket orderbook has valid structure (not empty)
+                if ws_orderbook.get("yes") or ws_orderbook.get("no"):
+                    # Wrap in same format as REST API response
+                    orderbook = {"orderbook": ws_orderbook}
+                    log.debug("Using WebSocket orderbook for %s", ticker)
+                else:
+                    log.debug("WebSocket orderbook for %s is empty, falling back to REST", ticker)
 
         # Fall back to REST if WebSocket data not available
         if orderbook is None:
             orderbook = client.get_orderbook(ticker)
-            if ws_client:
+            if ws_client and ws_client.is_connected():
                 log.debug("WebSocket orderbook not available, using REST for %s", ticker)
 
         balance = client.get_balance()
