@@ -81,7 +81,10 @@ class TestGetMarketQuotes(unittest.TestCase):
         self.assertIsNone(quotes["mid_price"])
 
     def test_only_yes_bids(self):
-        """Test orderbook with only YES bids (no NO bids)."""
+        """Test orderbook with only YES bids (no NO bids).
+
+        With the new inference logic, YES ask should be inferred even without NO bids.
+        """
         orderbook = {
             "orderbook": {
                 "yes": [[60, 10]],
@@ -94,15 +97,18 @@ class TestGetMarketQuotes(unittest.TestCase):
 
         self.assertEqual(quotes["best_yes_bid"], 60)
         self.assertIsNone(quotes["best_no_bid"])
-        # YES ask cannot be computed without NO bids
-        self.assertIsNone(quotes["best_yes_ask"])
+        # YES ask should be inferred (60 + 1 = 61) since NO side is empty
+        self.assertEqual(quotes["best_yes_ask"], 61)
         # NO ask = 100 - 60 = 40
         self.assertEqual(quotes["best_no_ask"], 40)
-        # Mid cannot be computed without YES ask
-        self.assertIsNone(quotes["mid_price"])
+        # Mid should be computed from YES bid/ask
+        self.assertEqual(quotes["mid_price"], (60 + 61) // 2)
 
     def test_only_no_bids(self):
-        """Test orderbook with only NO bids (no YES bids)."""
+        """Test orderbook with only NO bids (no YES bids).
+
+        With the new inference logic, NO ask should be inferred even without YES bids.
+        """
         orderbook = {
             "orderbook": {
                 "yes": [],
@@ -117,10 +123,11 @@ class TestGetMarketQuotes(unittest.TestCase):
         self.assertEqual(quotes["best_no_bid"], 40)
         # YES ask = 100 - 40 = 60
         self.assertEqual(quotes["best_yes_ask"], 60)
-        # NO ask cannot be computed without YES bids
-        self.assertIsNone(quotes["best_no_ask"])
-        # Mid cannot be computed without YES bid
-        self.assertIsNone(quotes["mid_price"])
+        # NO ask should be inferred (40 + 1 = 41) since YES side is empty
+        self.assertEqual(quotes["best_no_ask"], 41)
+        # Mid should be computed from NO bid/ask: 100 - ((40 + 41) // 2)
+        expected_mid = 100 - ((40 + 41) // 2)
+        self.assertEqual(quotes["mid_price"], expected_mid)
 
     def test_error_handling(self):
         """Test that errors in get_orderbook are caught and return None values."""
@@ -188,6 +195,121 @@ class TestSuggestLimitPriceWithOrderbook(unittest.TestCase):
         # Should use new values (60-62 range), not old values (50-52 range)
         self.assertGreaterEqual(yes_price, 60)
         self.assertLessEqual(yes_price, 62)
+
+
+class TestOneSidedOrderbooks(unittest.TestCase):
+    """Test handling of one-sided orderbooks with inference logic."""
+
+    def setUp(self):
+        """Create a mock KalshiClient instance."""
+        with patch.object(KalshiClient, '_load_private_key', return_value=None):
+            self.client = KalshiClient()
+
+    def test_only_yes_bids_with_inference(self):
+        """Test that YES ask is inferred when only YES bids present."""
+        orderbook = {
+            "orderbook": {
+                "yes": [[60, 10]],  # YES bid at 60c
+                "no": [],           # No NO bids
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # YES bid should be extracted
+        self.assertEqual(quotes["best_yes_bid"], 60)
+        # YES ask should be inferred (60 + 1 = 61)
+        self.assertEqual(quotes["best_yes_ask"], 61)
+        # NO bid should be None
+        self.assertIsNone(quotes["best_no_bid"])
+        # NO ask should be computed from YES bid: 100 - 60 = 40
+        self.assertEqual(quotes["best_no_ask"], 40)
+        # Mid should be computed from YES bid/ask
+        self.assertEqual(quotes["mid_price"], (60 + 61) // 2)
+
+    def test_only_no_bids_with_inference(self):
+        """Test that NO ask is inferred when only NO bids present."""
+        orderbook = {
+            "orderbook": {
+                "yes": [],           # No YES bids
+                "no": [[40, 10]],    # NO bid at 40c
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # NO bid should be extracted
+        self.assertEqual(quotes["best_no_bid"], 40)
+        # NO ask should be inferred (40 + 1 = 41)
+        self.assertEqual(quotes["best_no_ask"], 41)
+        # YES bid should be None
+        self.assertIsNone(quotes["best_yes_bid"])
+        # YES ask should be computed from NO bid: 100 - 40 = 60
+        self.assertEqual(quotes["best_yes_ask"], 60)
+        # Mid should be computed from NO bid/ask: 100 - ((40 + 41) // 2)
+        expected_mid = 100 - ((40 + 41) // 2)
+        self.assertEqual(quotes["mid_price"], expected_mid)
+
+    def test_yes_dollars_format_with_strings(self):
+        """Test parsing of yes_dollars/no_dollars format with string prices."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars": [["0.55", "10"], ["0.54", "5"]],  # String format
+                "no_dollars": [["0.45", "8"]],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # Should parse "0.55" as 55 cents
+        self.assertEqual(quotes["best_yes_bid"], 55)
+        # Should parse "0.45" as 45 cents
+        self.assertEqual(quotes["best_no_bid"], 45)
+        # YES ask = 100 - 45 = 55
+        self.assertEqual(quotes["best_yes_ask"], 55)
+        # NO ask = 100 - 55 = 45
+        self.assertEqual(quotes["best_no_ask"], 45)
+
+    def test_yes_dollars_one_sided_with_inference(self):
+        """Test yes_dollars format with only one side present."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars": [["0.65", "15"]],
+                "no_dollars": [],  # Empty NO side
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # YES bid from yes_dollars
+        self.assertEqual(quotes["best_yes_bid"], 65)
+        # YES ask inferred (65 + 1 = 66)
+        self.assertEqual(quotes["best_yes_ask"], 66)
+        # NO bid should be None
+        self.assertIsNone(quotes["best_no_bid"])
+        # NO ask from YES bid
+        self.assertEqual(quotes["best_no_ask"], 35)  # 100 - 65
+
+    def test_fallback_to_standard_format(self):
+        """Test that standard format is used when orderbook_fp is not present."""
+        orderbook = {
+            "orderbook": {
+                "yes": [[52, 10]],
+                "no": [[48, 8]],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        self.assertEqual(quotes["best_yes_bid"], 52)
+        self.assertEqual(quotes["best_no_bid"], 48)
+        self.assertEqual(quotes["best_yes_ask"], 52)  # 100 - 48
+        self.assertEqual(quotes["best_no_ask"], 48)  # 100 - 52
 
 
 if __name__ == "__main__":

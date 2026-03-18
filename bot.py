@@ -245,6 +245,8 @@ def _quotes_from_orderbook(orderbook: dict) -> dict:
 
     This avoids making a second /orderbook (or equivalent) API call when we
     already have the raw orderbook data.
+
+    Supports multiple orderbook formats and handles one-sided books with inference.
     """
     # Default structure in case the orderbook is missing or empty
     result = {
@@ -259,41 +261,92 @@ def _quotes_from_orderbook(orderbook: dict) -> dict:
         return result
 
     try:
-        yes_book = orderbook.get("yes", {}) or {}
-        no_book = orderbook.get("no", {}) or {}
+        # Support multiple formats:
+        # 1. WebSocket/REST wrapped: {"orderbook": {"yes": [...], "no": [...]}}
+        # 2. Direct format: {"yes": {...}, "no": {...}}
+        # 3. Float price format: {"orderbook_fp": {"yes_dollars": [...], "no_dollars": [...]}}
 
-        yes_bids = yes_book.get("bids") or []
-        yes_asks = yes_book.get("asks") or []
-        no_bids = no_book.get("bids") or []
-        no_asks = no_book.get("asks") or []
+        orderbook_data = orderbook.get("orderbook", {})
+        orderbook_fp = orderbook.get("orderbook_fp", {})
+
+        # Try to get yes/no arrays from different possible locations
+        yes_array = orderbook_fp.get("yes_dollars") or orderbook_data.get("yes") or orderbook.get("yes")
+        no_array = orderbook_fp.get("no_dollars") or orderbook_data.get("no") or orderbook.get("no")
+
+        # Parse arrays - they could be:
+        # - Direct arrays: [[price, size], ...]
+        # - Dict with bids/asks: {"bids": [...], "asks": [...]}
+        # - String format: [["0.55", "10"], ...]
+        def extract_bids(data):
+            """Extract bid prices from various formats."""
+            if not data:
+                return []
+
+            # If data is a dict with 'bids' key
+            if isinstance(data, dict):
+                bids = data.get("bids") or []
+                return bids
+
+            # If data is already a list
+            if isinstance(data, list):
+                return data
+
+            return []
+
+        yes_bids = extract_bids(yes_array)
+        no_bids = extract_bids(no_array)
 
         def _best_price(entries):
+            """Extract best price from bid/ask entries in various formats."""
             if not entries:
                 return None
+
             top = entries[0]
-            # Entries are expected to be dicts with a "price" field
-            return top.get("price") if isinstance(top, dict) else None
+
+            # Format 1: Dict with "price" field
+            if isinstance(top, dict):
+                return top.get("price")
+
+            # Format 2: Array [price, size] where price could be int or string
+            if isinstance(top, (list, tuple)) and len(top) >= 1:
+                price = top[0]
+                # Handle string dollar format: "0.55" -> 55 cents
+                if isinstance(price, str):
+                    try:
+                        return int(float(price) * 100)
+                    except (ValueError, TypeError):
+                        return None
+                # Handle numeric cent format: 55
+                return int(price)
+
+            return None
 
         result["best_yes_bid"] = _best_price(yes_bids)
-        result["best_yes_ask"] = _best_price(yes_asks)
         result["best_no_bid"] = _best_price(no_bids)
-        result["best_no_ask"] = _best_price(no_asks)
 
-        prices = [
-            p
-            for p in (
-                result["best_yes_bid"],
-                result["best_yes_ask"],
-                result["best_no_bid"],
-                result["best_no_ask"],
-            )
-            if p is not None
-        ]
-        if prices:
-            # Use a simple average of available best prices as a robust mid.
-            avg = sum(prices) / len(prices)
-            # Keep type consistent with existing prices (typically integer cents)
-            result["mid_price"] = round(avg)
+        # Compute asks using complementary pricing
+        result["best_yes_ask"] = (100 - result["best_no_bid"]) if result["best_no_bid"] is not None else None
+        result["best_no_ask"] = (100 - result["best_yes_bid"]) if result["best_yes_bid"] is not None else None
+
+        # For one-sided books, infer missing ask using minimal spread
+        if result["best_yes_bid"] is not None and result["best_yes_ask"] is None:
+            # No NO bids, infer YES ask with minimal spread
+            result["best_yes_ask"] = min(result["best_yes_bid"] + 1, 99)
+            log.debug("Inferred best_yes_ask=%d from best_yes_bid=%d (one-sided book)",
+                     result["best_yes_ask"], result["best_yes_bid"])
+
+        if result["best_no_bid"] is not None and result["best_no_ask"] is None:
+            # No YES bids, infer NO ask with minimal spread
+            result["best_no_ask"] = min(result["best_no_bid"] + 1, 99)
+            log.debug("Inferred best_no_ask=%d from best_no_bid=%d (one-sided book)",
+                     result["best_no_ask"], result["best_no_bid"])
+
+        # Compute mid price if we have at least one complete bid/ask pair
+        if result["best_yes_bid"] is not None and result["best_yes_ask"] is not None:
+            result["mid_price"] = (result["best_yes_bid"] + result["best_yes_ask"]) // 2
+        elif result["best_no_bid"] is not None and result["best_no_ask"] is not None:
+            # Use NO side to compute mid if YES side unavailable
+            result["mid_price"] = 100 - ((result["best_no_bid"] + result["best_no_ask"]) // 2)
     except Exception:
         # On any unexpected structure, fall back to defaults (all None)
         return result
@@ -337,8 +390,12 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
             # Try to get orderbook from WebSocket
             ws_orderbook = ws_client.get_latest_orderbook(ticker)
             if ws_orderbook:
-                # Ensure the WebSocket orderbook has valid structure (not empty)
-                if ws_orderbook.get("yes") or ws_orderbook.get("no"):
+                # Check if orderbook has any non-empty side (yes OR no)
+                # Support both formats: yes/no and yes_dollars/no_dollars
+                has_yes = bool(ws_orderbook.get("yes") or ws_orderbook.get("yes_dollars"))
+                has_no = bool(ws_orderbook.get("no") or ws_orderbook.get("no_dollars"))
+
+                if has_yes or has_no:
                     # Wrap in same format as REST API response
                     orderbook = {"orderbook": ws_orderbook}
                     log.debug("Using WebSocket orderbook for %s", ticker)
@@ -373,12 +430,34 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
         no_ask = quotes.get("best_no_ask")
         mid = quotes.get("mid_price")
 
+        # Check if orderbook is truly empty (both YES and NO sides have no quotes)
+        # With one-sided inference, we should have at least bid OR ask on YES side
         if yes_bid is not None and yes_ask is not None:
             log.info("Active market: %s | last=%sc yes=%dc/%dc no=%dc/%dc mid=%dc (from orderbook)",
                      ticker, market.get("last_price"),
                      yes_bid, yes_ask, no_bid, no_ask, mid)
         else:
-            log.warning("Active market: %s | orderbook empty (no quotes available)", ticker)
+            # Only log as empty if BOTH sides are truly empty
+            # Extract raw orderbook data for debugging
+            orderbook_data = orderbook.get("orderbook", {})
+            orderbook_fp = orderbook.get("orderbook_fp", {})
+            yes_raw = orderbook_fp.get("yes_dollars") or orderbook_data.get("yes") or orderbook.get("yes")
+            no_raw = orderbook_fp.get("no_dollars") or orderbook_data.get("no") or orderbook.get("no")
+
+            # Truncate arrays if they're too long for logging
+            def truncate_array(arr, max_items=5):
+                if not arr:
+                    return arr
+                if isinstance(arr, list) and len(arr) > max_items:
+                    return arr[:max_items] + [f"...({len(arr) - max_items} more)"]
+                return arr
+
+            yes_display = truncate_array(yes_raw) if yes_raw else []
+            no_display = truncate_array(no_raw) if no_raw else []
+
+            log.warning("Active market: %s | orderbook empty (no quotes available) | "
+                       "Raw orderbook: yes=%s, no=%s",
+                       ticker, yes_display, no_display)
     else:
         # Use old market data fields
         log.info("Active market: %s | last=%sc yes=%s/%s no=%s/%s",

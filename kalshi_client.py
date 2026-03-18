@@ -209,13 +209,45 @@ class KalshiClient:
 
         Note: Kalshi's orderbook contains bids only (no asks). To compute YES ask,
         we use: YES ask ≈ 100 - best_no_bid (since buying YES is equivalent to
-        selling NO at the complementary price).
+        selling NO at the complementary price). When only one side has bids, we can
+        infer the other side's ask using the complementary price relationship.
         """
         try:
             orderbook = self.get_orderbook(ticker)
             orderbook_data = orderbook.get("orderbook", {})
-            yes_bids = orderbook_data.get("yes", [])  # List of [price_cents, size]
-            no_bids = orderbook_data.get("no", [])
+
+            # Support multiple orderbook formats:
+            # 1. REST/WebSocket: {"yes": [[price, size], ...], "no": [[price, size], ...]}
+            # 2. Alternative: {"yes_dollars": [...], "no_dollars": [...]}
+            # Try orderbook_fp first (newer format), then fall back to standard format
+            orderbook_fp = orderbook.get("orderbook_fp", {})
+            yes_bids = orderbook_fp.get("yes_dollars", []) or orderbook_data.get("yes", [])
+            no_bids = orderbook_fp.get("no_dollars", []) or orderbook_data.get("no", [])
+
+            # Parse bid arrays - support both [price, size] and ["price_string", "count_string"] formats
+            def parse_bids(bid_array):
+                """Parse bid array, handling both numeric and string formats."""
+                if not bid_array:
+                    return []
+
+                parsed = []
+                for entry in bid_array:
+                    if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                        # Handle string format: ["0.55", "10"]
+                        if isinstance(entry[0], str):
+                            try:
+                                price_cents = int(float(entry[0]) * 100)
+                                size = int(entry[1])
+                                parsed.append([price_cents, size])
+                            except (ValueError, TypeError):
+                                continue
+                        # Handle numeric format: [55, 10]
+                        else:
+                            parsed.append([int(entry[0]), int(entry[1])])
+                return parsed
+
+            yes_bids = parse_bids(yes_bids)
+            no_bids = parse_bids(no_bids)
 
             # Extract best bids (highest price = index 0, as they're sorted descending)
             best_yes_bid = yes_bids[0][0] if yes_bids else None
@@ -227,9 +259,29 @@ class KalshiClient:
             best_yes_ask = (100 - best_no_bid) if best_no_bid is not None else None
             best_no_ask = (100 - best_yes_bid) if best_yes_bid is not None else None
 
-            # Compute mid price only if we have both yes bid and ask
+            # For one-sided books, infer the missing ask from the available bid
+            # If we have YES bid but no YES ask (because NO side is empty),
+            # we can still infer best_yes_ask from best_yes_bid using market convention:
+            # The ask should be at least 1 cent higher than the bid
+            if best_yes_bid is not None and best_yes_ask is None:
+                # No NO bids available, but we can still estimate YES ask
+                # Use a minimal spread assumption: ask = bid + 1 cent (minimum tick)
+                best_yes_ask = min(best_yes_bid + 1, 99)
+                log.debug("Inferred best_yes_ask=%d from best_yes_bid=%d (no NO bids available)",
+                         best_yes_ask, best_yes_bid)
+
+            if best_no_bid is not None and best_no_ask is None:
+                # No YES bids available, but we can still estimate NO ask
+                best_no_ask = min(best_no_bid + 1, 99)
+                log.debug("Inferred best_no_ask=%d from best_no_bid=%d (no YES bids available)",
+                         best_no_ask, best_no_bid)
+
+            # Compute mid price if we have at least one complete bid/ask pair
             if best_yes_bid is not None and best_yes_ask is not None:
                 mid_price = (best_yes_bid + best_yes_ask) // 2
+            elif best_no_bid is not None and best_no_ask is not None:
+                # Use NO side to compute mid if YES side unavailable
+                mid_price = 100 - ((best_no_bid + best_no_ask) // 2)
             else:
                 mid_price = None
 

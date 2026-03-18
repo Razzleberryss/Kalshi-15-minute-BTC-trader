@@ -464,14 +464,30 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
 
     # Market mid is used solely to anchor model_p_yes (independent of spread).
     # Support both old market dict format and new orderbook-based quotes.
-    # If yes_bid or yes_ask is missing, skip this cycle entirely instead of defaulting to 50c
+    # With one-sided orderbook inference, we should have yes_bid/yes_ask available
+    # even when only one side of the orderbook has liquidity.
     yes_bid = market.get("best_yes_bid") or market.get("yes_bid")
     yes_ask = market.get("best_yes_ask") or market.get("yes_ask")
 
     if yes_bid is None or yes_ask is None:
-        log.warning(
-            "Market data missing YES bid/ask quotes (best_yes_bid/best_yes_ask or yes_bid/yes_ask) — skipping cycle (no quotes available)"
-        )
+        # Extract raw orderbook data for debugging if available
+        if "orderbook" in market or "orderbook_fp" in market:
+            orderbook_data = market.get("orderbook", {})
+            orderbook_fp = market.get("orderbook_fp", {})
+            yes_raw = orderbook_fp.get("yes_dollars") or orderbook_data.get("yes", [])
+            no_raw = orderbook_fp.get("no_dollars") or orderbook_data.get("no", [])
+            log.warning(
+                "Market data missing YES bid/ask quotes — skipping cycle | "
+                "yes_bid=%s, yes_ask=%s, best_yes_bid=%s, best_yes_ask=%s | "
+                "Raw orderbook: yes=%s, no=%s",
+                yes_bid, yes_ask,
+                market.get("best_yes_bid"), market.get("best_yes_ask"),
+                yes_raw[:3] if yes_raw else [], no_raw[:3] if no_raw else []
+            )
+        else:
+            log.warning(
+                "Market data missing YES bid/ask quotes (best_yes_bid/best_yes_ask or yes_bid/yes_ask) — skipping cycle (no quotes available)"
+            )
         return None
 
     market_mid = float(np.clip((yes_bid + yes_ask) / 2 / 100.0, 0.01, 0.99))
