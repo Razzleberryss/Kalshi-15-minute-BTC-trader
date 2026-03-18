@@ -85,6 +85,10 @@ BTC_SERIES_TICKER: str = os.getenv("BTC_SERIES_TICKER", "BTCZ")
 BTC_TICKER: str = os.getenv("BTC_TICKER", "BTC-USD")  # yfinance symbol
 MOMENTUM_LOOKBACK_BARS: int = int(os.getenv("MOMENTUM_LOOKBACK_BARS", "5"))
 
+# USE_ORDERBOOK_PRICES: When True, fetch quotes from the orderbook instead of
+# the /markets API response. Defaults to True (new behavior).
+USE_ORDERBOOK_PRICES: bool = os.getenv("USE_ORDERBOOK_PRICES", "true").lower() == "true"
+
 # Trading threshold parameters - tunable for more/less aggressive trading
 MIN_EDGE_THRESHOLD: float = float(os.getenv("MIN_EDGE_THRESHOLD", "0.02"))
 MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", "0.003"))

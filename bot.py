@@ -166,7 +166,9 @@ def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, curr
     entry_price = pos["entry_price"]
 
     # Current best bid for our side — what we can sell for right now
-    current_price = market.get(f"{side}_bid", entry_price)
+    # Support both old (yes_bid) and new (best_yes_bid) field names
+    bid_field = f"best_{side}_bid" if f"best_{side}_bid" in market else f"{side}_bid"
+    current_price = market.get(bid_field, entry_price)
 
     exit_reason = None
 
@@ -245,10 +247,6 @@ def run_once(client: KalshiClient, risk: RiskManager):
         log.error("Refusing non-BTC-series market: %s", ticker)
         risk._clear_datetime_cache()
         return False
-    log.info("Active market: %s | last=%sc yes=%s/%s no=%s/%s",
-             ticker, market.get("last_price"),
-             market.get("yes_bid"), market.get("yes_ask"),
-             market.get("no_bid"), market.get("no_ask"))
 
     # 2. Fetch supporting data
     try:
@@ -259,6 +257,32 @@ def run_once(client: KalshiClient, risk: RiskManager):
         log.error("API fetch error: %s", exc)
         risk._clear_datetime_cache()
         return False
+
+    # 2b. Populate market dict with orderbook-based quotes if enabled
+    if config.USE_ORDERBOOK_PRICES:
+        quotes = client.get_market_quotes(ticker)
+        # Merge quotes into market dict, using new field names (best_yes_bid, etc.)
+        market.update(quotes)
+
+        # Log with orderbook-based prices
+        yes_bid = quotes.get("best_yes_bid")
+        yes_ask = quotes.get("best_yes_ask")
+        no_bid = quotes.get("best_no_bid")
+        no_ask = quotes.get("best_no_ask")
+        mid = quotes.get("mid_price")
+
+        if yes_bid is not None and yes_ask is not None:
+            log.info("Active market: %s | last=%sc yes=%dc/%dc no=%dc/%dc mid=%dc (from orderbook)",
+                     ticker, market.get("last_price"),
+                     yes_bid, yes_ask, no_bid, no_ask, mid)
+        else:
+            log.warning("Active market: %s | orderbook empty (no quotes available)", ticker)
+    else:
+        # Use old market data fields
+        log.info("Active market: %s | last=%sc yes=%s/%s no=%s/%s",
+                 ticker, market.get("last_price"),
+                 market.get("yes_bid"), market.get("yes_ask"),
+                 market.get("no_bid"), market.get("no_ask"))
 
     # ── reddit_time_delay strategy path ───────────────────────────────────────
     if config.STRATEGY_MODE == "reddit_time_delay":
@@ -403,11 +427,12 @@ def _run_once_time_delay(
 
     # Derive entry prices from ask (realistic cost to open a position)
     # and exit prices from bid (the price we can realistically sell at).
+    # Support both old field names (yes_ask, yes_bid) and new (best_yes_ask, best_yes_bid)
     # Consolidate market data lookups to avoid redundant dictionary access
-    yes_ask_cents = market.get("yes_ask", 50)
-    no_ask_cents = market.get("no_ask", 50)
-    yes_bid_cents = market.get("yes_bid", 50)
-    no_bid_cents = market.get("no_bid", 50)
+    yes_ask_cents = market.get("best_yes_ask") or market.get("yes_ask", 50)
+    no_ask_cents = market.get("best_no_ask") or market.get("no_ask", 50)
+    yes_bid_cents = market.get("best_yes_bid") or market.get("yes_bid", 50)
+    no_bid_cents = market.get("best_no_bid") or market.get("no_bid", 50)
     up_price = float(yes_ask_cents) / 100.0   # ask — used for entry trigger
     down_price = float(no_ask_cents) / 100.0  # ask — used for entry trigger
     up_bid = float(yes_bid_cents) / 100.0     # bid — used for stop-loss exit

@@ -181,6 +181,62 @@ class KalshiClient:
         """Return market details including last_price, yes_ask, no_ask."""
         return self._request("GET", f"/markets/{ticker}")
 
+    def get_market_quotes(self, ticker: str) -> dict:
+        """
+        Get best bid/ask quotes from the orderbook for a market.
+
+        Returns a dict with:
+            best_yes_bid: int | None - highest YES bid in cents (best buy price for YES)
+            best_yes_ask: int | None - lowest YES ask in cents (best sell price for YES)
+            best_no_bid: int | None - highest NO bid in cents (best buy price for NO)
+            best_no_ask: int | None - lowest NO ask in cents (best sell price for NO)
+            mid_price: int | None - midpoint of yes bid/ask in cents, or None if no quotes
+
+        All prices are in cents (1-99 range). Returns None values if orderbook is empty.
+
+        Note: Kalshi's orderbook contains bids only (no asks). To compute YES ask,
+        we use: YES ask ≈ 100 - best_no_bid (since buying YES is equivalent to
+        selling NO at the complementary price).
+        """
+        try:
+            orderbook = self.get_orderbook(ticker)
+            orderbook_data = orderbook.get("orderbook", {})
+            yes_bids = orderbook_data.get("yes", [])  # List of [price_cents, size]
+            no_bids = orderbook_data.get("no", [])
+
+            # Extract best bids (highest price = index 0, as they're sorted descending)
+            best_yes_bid = yes_bids[0][0] if yes_bids else None
+            best_no_bid = no_bids[0][0] if no_bids else None
+
+            # Compute asks from the complementary side
+            # YES ask = what you pay to buy YES = 100 - (what NO buyers are willing to pay)
+            # NO ask = what you pay to buy NO = 100 - (what YES buyers are willing to pay)
+            best_yes_ask = (100 - best_no_bid) if best_no_bid is not None else None
+            best_no_ask = (100 - best_yes_bid) if best_yes_bid is not None else None
+
+            # Compute mid price only if we have both yes bid and ask
+            if best_yes_bid is not None and best_yes_ask is not None:
+                mid_price = (best_yes_bid + best_yes_ask) // 2
+            else:
+                mid_price = None
+
+            return {
+                "best_yes_bid": best_yes_bid,
+                "best_yes_ask": best_yes_ask,
+                "best_no_bid": best_no_bid,
+                "best_no_ask": best_no_ask,
+                "mid_price": mid_price,
+            }
+        except Exception as exc:
+            log.warning("Error fetching market quotes from orderbook for %s: %s", ticker, exc)
+            return {
+                "best_yes_bid": None,
+                "best_yes_ask": None,
+                "best_no_bid": None,
+                "best_no_ask": None,
+                "mid_price": None,
+            }
+
     def get_positions(self) -> list:
         """Return list of current open positions."""
         data = self._request("GET", "/portfolio/positions")

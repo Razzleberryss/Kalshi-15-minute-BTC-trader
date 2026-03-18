@@ -132,15 +132,19 @@ def suggest_limit_price(market: dict, side: str) -> int:
     """
     Pick a conservative limit price to ensure fills without crossing the spread.
     Returns a price in cents (1-99).
+
+    Supports both old market dict format (yes_ask, yes_bid fields) and new
+    orderbook-based quotes (best_yes_ask, best_yes_bid fields).
     """
     if side == "yes":
         # Pay up to the current yes_ask but no more than mid + 2c
-        ask = market.get("yes_ask", 50)
-        bid = market.get("yes_bid", max(1, ask - 4))
+        # Support both old (yes_ask) and new (best_yes_ask) field names
+        ask = market.get("best_yes_ask") or market.get("yes_ask", 50)
+        bid = market.get("best_yes_bid") or market.get("yes_bid", max(1, ask - 4))
         price = min(ask, bid + 2)  # slightly above best bid
     else:
-        ask = market.get("no_ask", 50)
-        bid = market.get("no_bid", max(1, ask - 4))
+        ask = market.get("best_no_ask") or market.get("no_ask", 50)
+        bid = market.get("best_no_bid") or market.get("no_bid", max(1, ask - 4))
         price = min(ask, bid + 2)
 
     return max(config.MIN_CONTRACT_PRICE_CENTS, min(config.MAX_CONTRACT_PRICE_CENTS, price))
@@ -459,15 +463,17 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
     side = "yes" if composite > 0 else "no"
 
     # Market mid is used solely to anchor model_p_yes (independent of spread).
+    # Support both old market dict format and new orderbook-based quotes.
     # If yes_bid or yes_ask is missing, skip this cycle entirely instead of defaulting to 50c
-    if "yes_bid" not in market or "yes_ask" not in market:
+    yes_bid = market.get("best_yes_bid") or market.get("yes_bid")
+    yes_ask = market.get("best_yes_ask") or market.get("yes_ask")
+
+    if yes_bid is None or yes_ask is None:
         log.warning(
             "Market data missing yes_bid/yes_ask — skipping cycle (no quotes available)"
         )
         return None
 
-    yes_bid = market.get("yes_bid")
-    yes_ask = market.get("yes_ask")
     market_mid = float(np.clip((yes_bid + yes_ask) / 2 / 100.0, 0.01, 0.99))
 
     # Apply MAX_SLIPPAGE filter: skip if spread is too wide
