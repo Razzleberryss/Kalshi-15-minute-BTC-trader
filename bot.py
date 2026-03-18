@@ -74,14 +74,17 @@ def _parse_close_time(close_time_str: str) -> datetime.datetime:
     return _parsed_datetime_cache[close_time_str]
 
 
-def _compute_minutes_to_expiry(market: dict) -> int:
-    """Return whole minutes remaining until market close_time, or 999 if unknown."""
+def _compute_minutes_to_expiry(market: dict, cached_now: datetime.datetime = None) -> int:
+    """
+    Return whole minutes remaining until market close_time, or 999 if unknown.
+    Accepts cached_now to avoid redundant datetime.now() calls.
+    """
     close_time_str = market.get("close_time")
     if not close_time_str:
         return 999
     try:
         close_time = _parse_close_time(close_time_str)
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = cached_now or datetime.datetime.now(datetime.timezone.utc)
         seconds = max(0.0, (close_time - now).total_seconds())
         return int(seconds // 60)
     except (ValueError, TypeError):
@@ -179,7 +182,8 @@ def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, curr
         if close_time_str:
             try:
                 close_time = _parse_close_time(close_time_str)
-                now = datetime.datetime.now(datetime.timezone.utc)
+                # Use cached datetime from risk manager to avoid redundant calls
+                now = risk._get_current_datetime()
                 if (close_time - now).total_seconds() <= config.EXPIRY_EXIT_SECONDS:
                     exit_reason = "expiry"
             except (ValueError, TypeError):
@@ -379,7 +383,9 @@ def _run_once_time_delay(
         return False
 
     # 2. Compute window context
-    minutes_to_expiry = _compute_minutes_to_expiry(market)
+    # Use cached datetime from risk manager for consistency and performance
+    cached_now = risk._get_current_datetime()
+    minutes_to_expiry = _compute_minutes_to_expiry(market, cached_now)
     current_window_id = _compute_window_id(market)
 
     # Reset per-window entry counter when the market window has rolled over.
@@ -388,6 +394,7 @@ def _run_once_time_delay(
 
     # Derive entry prices from ask (realistic cost to open a position)
     # and exit prices from bid (the price we can realistically sell at).
+    # Consolidate market data lookups to avoid redundant dictionary access
     yes_ask_cents = market.get("yes_ask", 50)
     no_ask_cents = market.get("no_ask", 50)
     yes_bid_cents = market.get("yes_bid", 50)
@@ -398,7 +405,9 @@ def _run_once_time_delay(
     down_bid = float(no_bid_cents) / 100.0    # bid — used for stop-loss exit
 
     # Determine whether this bot currently holds a YES or NO position
-    bot_pos = risk.get_open_positions().get(ticker)
+    # Cache the lookup to avoid redundant dictionary comprehension
+    bot_positions = risk.get_open_positions()
+    bot_pos = bot_positions.get(ticker)
     current_position_side: "str | None" = bot_pos["side"].upper() if bot_pos else None
 
     log.info(

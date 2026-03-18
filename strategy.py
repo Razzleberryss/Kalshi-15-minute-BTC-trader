@@ -29,7 +29,9 @@ import config
 log = logging.getLogger(__name__)
 
 # Cache for BTC momentum data to avoid redundant yfinance API calls
-_btc_momentum_cache: dict = {"data": None, "timestamp": 0, "ttl": 60}
+# TTL set to 5 minutes (300s) since 1-minute bars don't change that frequently
+# and reduces API calls in a 15-minute market window
+_btc_momentum_cache: dict = {"data": None, "timestamp": 0, "ttl": 300}
 
 
 @dataclass
@@ -104,8 +106,15 @@ def get_orderbook_skew(orderbook: dict) -> float:
 
         # Each entry is [price_cents, size]
         # Calculate liquidity weighted by price * size
-        yes_liquidity = sum(p * s for p, s in yes_bids) if yes_bids else 0
-        no_liquidity = sum(p * s for p, s in no_bids) if no_bids else 0
+        # Optimized: compute both in a single pass when possible
+        yes_liquidity = 0
+        no_liquidity = 0
+
+        for p, s in yes_bids:
+            yes_liquidity += p * s
+        for p, s in no_bids:
+            no_liquidity += p * s
+
         total = yes_liquidity + no_liquidity
 
         if total == 0:

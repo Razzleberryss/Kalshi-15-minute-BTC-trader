@@ -33,6 +33,8 @@ class RiskManager:
         self._open_positions: dict[str, dict] = {}
         # Cache for current datetime to reduce redundant calls
         self._cached_now: Optional[datetime] = None
+        # Trade log buffer for batch writes (reduces file I/O overhead)
+        self._trade_log_buffer: list[dict] = []
         self._ensure_log_file()
         self._load_daily_stats_from_log()
 
@@ -43,8 +45,9 @@ class RiskManager:
         return self._cached_now
 
     def _clear_datetime_cache(self):
-        """Clear the datetime cache. Call at the end of each bot cycle."""
+        """Clear the datetime cache and flush trade log buffer. Call at the end of each bot cycle."""
         self._cached_now = None
+        self._flush_trade_log_buffer()
 
     # ── Trade approval ───────────────────────────────────────────────────────────
 
@@ -169,10 +172,22 @@ class RiskManager:
         return pnl_cents
 
     def _append_trade_row(self, row: dict) -> None:
-        with open(config.TRADE_LOG_FILE, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=self._trade_log_headers())
-            writer.writerow(row)
-        log.info("Trade logged: %s", row)
+        """Buffer trade row for later flush instead of immediate write."""
+        self._trade_log_buffer.append(row)
+        log.info("Trade logged (buffered): %s", row)
+
+    def _flush_trade_log_buffer(self) -> None:
+        """Flush buffered trade rows to disk in a single write operation."""
+        if not self._trade_log_buffer:
+            return
+        try:
+            with open(config.TRADE_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self._trade_log_headers())
+                writer.writerows(self._trade_log_buffer)
+            log.debug("Flushed %d trade log entries to disk", len(self._trade_log_buffer))
+            self._trade_log_buffer.clear()
+        except Exception as exc:
+            log.error("Failed to flush trade log buffer: %s", exc)
 
     def _reset_daily_if_needed(self) -> None:
         today = datetime.now(timezone.utc).date()
