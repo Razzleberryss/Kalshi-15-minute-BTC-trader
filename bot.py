@@ -100,6 +100,14 @@ def _compute_window_id(market: dict) -> str:
 
 
 # ── Logging setup ──────────────────────────────────────────────────────────────────────────────
+# Define custom TRADE log level (25) between INFO (20) and WARNING (30)
+TRADE_LEVEL = 25
+logging.addLevelName(TRADE_LEVEL, "TRADE")
+
+def log_trade(msg, *args, **kwargs):
+    """Log a trade entry/exit at the custom TRADE level with bright green color."""
+    logging.getLogger("bot").log(TRADE_LEVEL, msg, *args, **kwargs)
+
 def setup_logging():
     handler = colorlog.StreamHandler()
     handler.setFormatter(colorlog.ColoredFormatter(
@@ -108,6 +116,7 @@ def setup_logging():
         log_colors={
             "DEBUG": "cyan",
             "INFO": "green",
+            "TRADE": "bold_green",  # Bright green and bold for trade logs
             "WARNING": "yellow",
             "ERROR": "red",
             "CRITICAL": "bold_red",
@@ -196,7 +205,7 @@ def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, curr
             if side == "yes"
             else (entry_price - exit_price) * count
         )
-        log.warning(
+        log_trade(
             "EXIT %s | side=%s | entry=%dc | exit=%dc | pnl=%+dc | reason=%s",
             ticker, side, entry_price, exit_price, pnl_cents, exit_reason,
         )
@@ -309,7 +318,7 @@ def run_once(client: KalshiClient, risk: RiskManager):
         risk._clear_datetime_cache()
         return False
 
-    log.info(
+    log_trade(
         "Placing BUY %s %s x%d @ %dc (est. cost $%.2f) | reason: %s",
         sig.side.upper(), ticker, contracts, sig.price_cents,
         contracts * sig.price_cents / 100, sig.reason
@@ -442,7 +451,7 @@ def _run_once_time_delay(
         exit_price_order = max(1, current_price - 1)
         # PnL = (sell price - buy price) × contracts — same for YES and NO
         pnl_cents = (exit_price_order - entry_price) * count
-        log.warning(
+        log_trade(
             "EXIT(time_delay) %s | side=%s | entry=%dc | exit=%dc | pnl=%+dc",
             ticker, side, entry_price, exit_price_order, pnl_cents,
         )
@@ -496,7 +505,7 @@ def _run_once_time_delay(
         risk._clear_datetime_cache()
         return False
 
-    log.info(
+    log_trade(
         "time_delay: Placing BUY %s %s x%d @ %dc (est. cost $%.2f)",
         side.upper(), ticker, contracts, sig_stub.price_cents,
         contracts * sig_stub.price_cents / 100,

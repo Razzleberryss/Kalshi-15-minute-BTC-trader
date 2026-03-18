@@ -84,7 +84,12 @@ MAX_TRADES_PER_WINDOW: int = int(os.getenv("MAX_TRADES_PER_WINDOW", "1"))
 BTC_SERIES_TICKER: str = os.getenv("BTC_SERIES_TICKER", "BTCZ")
 BTC_TICKER: str = os.getenv("BTC_TICKER", "BTC-USD")  # yfinance symbol
 MOMENTUM_LOOKBACK_BARS: int = int(os.getenv("MOMENTUM_LOOKBACK_BARS", "5"))
-MIN_EDGE_THRESHOLD: float = float(os.getenv("MIN_EDGE_THRESHOLD", "0.05"))
+
+# Trading threshold parameters - tunable for more/less aggressive trading
+MIN_EDGE_THRESHOLD: float = float(os.getenv("MIN_EDGE_THRESHOLD", "0.02"))
+MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", "0.003"))
+MAX_PRICE_DEVIATION: float = float(os.getenv("MAX_PRICE_DEVIATION", "0.12"))
+MAX_SLIPPAGE: float = float(os.getenv("MAX_SLIPPAGE", "0.08"))
 
 # =============================================================================
 # Fee-Aware Entry Parameters
@@ -172,6 +177,12 @@ def validate() -> None:
         errors.append("MOMENTUM_LOOKBACK_BARS must be >= 1")
     if not (0.0 < MIN_EDGE_THRESHOLD < 1.0):
         errors.append("MIN_EDGE_THRESHOLD must be between 0 and 1")
+    if not (0.0 < MIN_CONFIDENCE < 1.0):
+        errors.append("MIN_CONFIDENCE must be between 0 and 1")
+    if not (0.0 < MAX_PRICE_DEVIATION <= 1.0):
+        errors.append("MAX_PRICE_DEVIATION must be between 0 (exclusive) and 1 (inclusive)")
+    if not (0.0 < MAX_SLIPPAGE <= 1.0):
+        errors.append("MAX_SLIPPAGE must be between 0 (exclusive) and 1 (inclusive)")
     if not (0.0 < MIN_EDGE_PCT < 1.0):
         errors.append("MIN_EDGE_PCT must be between 0 and 1")
     if not (0.0 <= FORBIDDEN_PRICE_LOW < FORBIDDEN_PRICE_HIGH <= 1.0):
