@@ -86,7 +86,9 @@ BTC_TICKER: str = os.getenv("BTC_TICKER", "BTC-USD")  # yfinance symbol
 MOMENTUM_LOOKBACK_BARS: int = int(os.getenv("MOMENTUM_LOOKBACK_BARS", "5"))
 
 # USE_ORDERBOOK_PRICES: When True, fetch quotes from the orderbook instead of
-# the /markets API response. Defaults to True (new behavior).
+# the /markets API response. Defaults to True (new behavior). Set
+# USE_ORDERBOOK_PRICES=false in your .env to restore the previous behavior
+# based on the /markets API prices.
 USE_ORDERBOOK_PRICES: bool = os.getenv("USE_ORDERBOOK_PRICES", "true").lower() == "true"
 
 # Trading threshold parameters - tunable for more/less aggressive trading
