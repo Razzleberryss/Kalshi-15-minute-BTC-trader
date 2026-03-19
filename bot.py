@@ -261,17 +261,28 @@ def _quotes_from_orderbook(orderbook: dict) -> dict:
         return result
 
     try:
-        # Support multiple formats:
-        # 1. WebSocket/REST wrapped: {"orderbook": {"yes": [...], "no": [...]}}
-        # 2. Direct format: {"yes": {...}, "no": {...}}
-        # 3. Float price format: {"orderbook_fp": {"yes_dollars": [...], "no_dollars": [...]}}
+        # Support multiple formats, in priority order:
+        # 1. orderbook_fp.yes_dollars_fp / no_dollars_fp  (new fixed-point REST format)
+        # 2. orderbook_fp.yes_dollars / no_dollars        (older fp variant)
+        # 3. WebSocket/REST wrapped: {"orderbook": {"yes": [...], "no": [...]}}
+        # 4. Direct format: {"yes": {...}, "no": {...}}
 
         orderbook_data = orderbook.get("orderbook", {})
         orderbook_fp = orderbook.get("orderbook_fp", {})
 
         # Try to get yes/no arrays from different possible locations
-        yes_array = orderbook_fp.get("yes_dollars") or orderbook_data.get("yes") or orderbook.get("yes")
-        no_array = orderbook_fp.get("no_dollars") or orderbook_data.get("no") or orderbook.get("no")
+        yes_array = (
+            orderbook_fp.get("yes_dollars_fp")
+            or orderbook_fp.get("yes_dollars")
+            or orderbook_data.get("yes")
+            or orderbook.get("yes")
+        )
+        no_array = (
+            orderbook_fp.get("no_dollars_fp")
+            or orderbook_fp.get("no_dollars")
+            or orderbook_data.get("no")
+            or orderbook.get("no")
+        )
 
         # Parse arrays - they could be:
         # - Direct arrays: [[price, size], ...]
@@ -423,6 +434,17 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
         # Merge quotes into market dict, using new field names (best_yes_bid, etc.)
         market.update(quotes)
 
+        # Also propagate legacy field aliases so any code reading yes_bid/yes_ask
+        # directly (e.g. time-delay EXIT_POSITION path) gets correct values.
+        for new_field, legacy_field in (
+            ("best_yes_bid", "yes_bid"),
+            ("best_yes_ask", "yes_ask"),
+            ("best_no_bid",  "no_bid"),
+            ("best_no_ask",  "no_ask"),
+        ):
+            if quotes.get(new_field) is not None:
+                market[legacy_field] = quotes[new_field]
+
         # Log with orderbook-based prices
         yes_bid = quotes.get("best_yes_bid")
         yes_ask = quotes.get("best_yes_ask")
@@ -441,8 +463,18 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
             # Extract raw orderbook data for debugging
             orderbook_data = orderbook.get("orderbook", {})
             orderbook_fp = orderbook.get("orderbook_fp", {})
-            yes_raw = orderbook_fp.get("yes_dollars") or orderbook_data.get("yes") or orderbook.get("yes")
-            no_raw = orderbook_fp.get("no_dollars") or orderbook_data.get("no") or orderbook.get("no")
+            yes_raw = (
+                orderbook_fp.get("yes_dollars_fp")
+                or orderbook_fp.get("yes_dollars")
+                or orderbook_data.get("yes")
+                or orderbook.get("yes")
+            )
+            no_raw = (
+                orderbook_fp.get("no_dollars_fp")
+                or orderbook_fp.get("no_dollars")
+                or orderbook_data.get("no")
+                or orderbook.get("no")
+            )
 
             # Truncate arrays if they're too long for logging
             def truncate_array(arr, max_items=5):

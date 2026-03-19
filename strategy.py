@@ -98,22 +98,50 @@ def get_orderbook_skew(orderbook: dict) -> float:
     Returns a float in [-1, 1]:
       > 0  => more YES bids (market leans YES)
       < 0  => more NO bids  (market leans NO)
+
+    Supports all orderbook formats:
+      - orderbook_fp.yes_dollars_fp / no_dollars_fp  (new fixed-point format, string prices)
+      - orderbook_fp.yes_dollars / no_dollars        (older fp variant, string prices)
+      - orderbook.yes / orderbook.no                 (legacy integer-cents format)
     """
     try:
         orderbook_data = orderbook.get("orderbook", {})
-        yes_bids = orderbook_data.get("yes", [])
-        no_bids = orderbook_data.get("no", [])
+        orderbook_fp = orderbook.get("orderbook_fp", {})
 
-        # Each entry is [price_cents, size]
-        # Calculate liquidity weighted by price * size
-        # Optimized: compute both in a single pass when possible
+        # Priority: new fixed-point > older fp > legacy integer-cents
+        yes_raw = (
+            orderbook_fp.get("yes_dollars_fp")
+            or orderbook_fp.get("yes_dollars")
+            or orderbook_data.get("yes", [])
+        )
+        no_raw = (
+            orderbook_fp.get("no_dollars_fp")
+            or orderbook_fp.get("no_dollars")
+            or orderbook_data.get("no", [])
+        )
+
+        def to_price_cents(raw_price):
+            """Convert price to integer cents (handles both string dollars and int cents)."""
+            if isinstance(raw_price, str):
+                return round(float(raw_price) * 100)
+            return int(raw_price)
+
+        # Calculate liquidity weighted by price_cents * size
         yes_liquidity = 0
         no_liquidity = 0
 
-        for p, s in yes_bids:
-            yes_liquidity += p * s
-        for p, s in no_bids:
-            no_liquidity += p * s
+        for entry in yes_raw:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                try:
+                    yes_liquidity += to_price_cents(entry[0]) * int(float(entry[1]))
+                except (ValueError, TypeError):
+                    pass
+        for entry in no_raw:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                try:
+                    no_liquidity += to_price_cents(entry[0]) * int(float(entry[1]))
+                except (ValueError, TypeError):
+                    pass
 
         total = yes_liquidity + no_liquidity
 
@@ -470,23 +498,17 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
     yes_ask = market.get("best_yes_ask") or market.get("yes_ask")
 
     if yes_bid is None or yes_ask is None:
-        # Extract raw orderbook data for debugging if available
-        if "orderbook" in market or "orderbook_fp" in market:
-            orderbook_data = market.get("orderbook", {})
-            orderbook_fp = market.get("orderbook_fp", {})
-            yes_raw = orderbook_fp.get("yes_dollars") or orderbook_data.get("yes", [])
-            no_raw = orderbook_fp.get("no_dollars") or orderbook_data.get("no", [])
+        # Only emit the WARNING when both quotes are absent; a single missing
+        # value is unusual but not necessarily an error (log at DEBUG instead).
+        if yes_bid is None and yes_ask is None:
             log.warning(
-                "Market data missing YES bid/ask quotes — skipping cycle | "
-                "yes_bid=%s, yes_ask=%s, best_yes_bid=%s, best_yes_ask=%s | "
-                "Raw orderbook: yes=%s, no=%s",
-                yes_bid, yes_ask,
-                market.get("best_yes_bid"), market.get("best_yes_ask"),
-                yes_raw[:3] if yes_raw else [], no_raw[:3] if no_raw else []
+                "Market data missing YES bid/ask quotes — skipping cycle "
+                "(best_yes_bid and best_yes_ask are both None)"
             )
         else:
-            log.warning(
-                "Market data missing YES bid/ask quotes (best_yes_bid/best_yes_ask or yes_bid/yes_ask) — skipping cycle (no quotes available)"
+            log.debug(
+                "Market data incomplete: yes_bid=%s yes_ask=%s — skipping cycle",
+                yes_bid, yes_ask,
             )
         return None
 
