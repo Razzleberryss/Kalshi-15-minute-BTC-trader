@@ -216,13 +216,22 @@ class KalshiClient:
             orderbook = self.get_orderbook(ticker)
             orderbook_data = orderbook.get("orderbook", {})
 
-            # Support multiple orderbook formats:
-            # 1. REST/WebSocket: {"yes": [[price, size], ...], "no": [[price, size], ...]}
-            # 2. Alternative: {"yes_dollars": [...], "no_dollars": [...]}
-            # Try orderbook_fp first (newer format), then fall back to standard format
+            # Support multiple orderbook formats, in priority order:
+            # 1. orderbook_fp.yes_dollars_fp / no_dollars_fp  (new fixed-point REST format)
+            # 2. orderbook_fp.yes_dollars / no_dollars        (older fp variant, kept for compat)
+            # 3. orderbook.yes / orderbook.no                 (legacy integer-cents format)
+            # All string-price entries are converted to integer cents in parse_bids().
             orderbook_fp = orderbook.get("orderbook_fp", {})
-            yes_bids = orderbook_fp.get("yes_dollars", []) or orderbook_data.get("yes", [])
-            no_bids = orderbook_fp.get("no_dollars", []) or orderbook_data.get("no", [])
+            yes_bids = (
+                orderbook_fp.get("yes_dollars_fp")
+                or orderbook_fp.get("yes_dollars")
+                or orderbook_data.get("yes", [])
+            )
+            no_bids = (
+                orderbook_fp.get("no_dollars_fp")
+                or orderbook_fp.get("no_dollars")
+                or orderbook_data.get("no", [])
+            )
 
             # Parse bid arrays - support both [price, size] and ["price_string", "count_string"] formats
             def parse_bids(bid_array):
@@ -236,8 +245,8 @@ class KalshiClient:
                         # Handle string format: ["0.55", "10"]
                         if isinstance(entry[0], str):
                             try:
-                                price_cents = int(float(entry[0]) * 100)
-                                size = int(entry[1])
+                                price_cents = round(float(entry[0]) * 100)
+                                size = int(float(entry[1]))
                                 parsed.append([price_cents, size])
                             except (ValueError, TypeError):
                                 continue
