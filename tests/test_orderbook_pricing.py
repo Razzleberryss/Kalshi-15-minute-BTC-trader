@@ -311,6 +311,100 @@ class TestOneSidedOrderbooks(unittest.TestCase):
         self.assertEqual(quotes["best_yes_ask"], 52)  # 100 - 48
         self.assertEqual(quotes["best_no_ask"], 48)  # 100 - 52
 
+    def test_yes_dollars_fp_format(self):
+        """Test parsing of the new yes_dollars_fp / no_dollars_fp fixed-point fields."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars_fp": [["0.8500", "300.00"], ["0.8400", "150.00"]],
+                "no_dollars_fp": [["0.1400", "200.00"]],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # "0.8500" -> 85 cents
+        self.assertEqual(quotes["best_yes_bid"], 85)
+        # "0.1400" -> 14 cents
+        self.assertEqual(quotes["best_no_bid"], 14)
+        # YES ask = 100 - 14 = 86
+        self.assertEqual(quotes["best_yes_ask"], 86)
+        # NO ask = 100 - 85 = 15
+        self.assertEqual(quotes["best_no_ask"], 15)
+        # Mid = (85 + 86) // 2 = 85
+        self.assertEqual(quotes["mid_price"], (85 + 86) // 2)
+
+    def test_yes_dollars_fp_preferred_over_yes_dollars(self):
+        """Test that yes_dollars_fp takes priority over yes_dollars when both are present."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars_fp": [["0.7000", "100.00"]],
+                "no_dollars_fp": [["0.2500", "50.00"]],
+                "yes_dollars": [["0.5000", "10"]],  # Should be ignored
+                "no_dollars": [["0.4500", "5"]],    # Should be ignored
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # Should use yes_dollars_fp values (70, 25), not yes_dollars values (50, 45)
+        self.assertEqual(quotes["best_yes_bid"], 70)
+        self.assertEqual(quotes["best_no_bid"], 25)
+
+    def test_yes_dollars_fp_fallback_to_yes_dollars(self):
+        """Test fallback to yes_dollars when yes_dollars_fp is absent."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars": [["0.6000", "20"]],
+                "no_dollars": [["0.3500", "10"]],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        self.assertEqual(quotes["best_yes_bid"], 60)
+        self.assertEqual(quotes["best_no_bid"], 35)
+
+    def test_yes_dollars_fp_one_sided(self):
+        """Test yes_dollars_fp with only YES side present uses 100 - bid for NO ask."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars_fp": [["0.7500", "500.00"]],
+                "no_dollars_fp": [],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # YES bid from yes_dollars_fp
+        self.assertEqual(quotes["best_yes_bid"], 75)
+        # NO bid is absent
+        self.assertIsNone(quotes["best_no_bid"])
+        # NO ask = 100 - best_yes_bid = 100 - 75 = 25
+        self.assertEqual(quotes["best_no_ask"], 25)
+        # YES ask inferred = 75 + 1 = 76
+        self.assertEqual(quotes["best_yes_ask"], 76)
+
+    def test_rounding_in_fp_conversion(self):
+        """Test that dollar string to cents conversion rounds correctly."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars_fp": [["0.3000", "100.00"]],
+                "no_dollars_fp": [["0.6500", "100.00"]],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # "0.3000" must round to 30, not 29 (float truncation bug guard)
+        self.assertEqual(quotes["best_yes_bid"], 30)
+        # "0.6500" -> 65
+        self.assertEqual(quotes["best_no_bid"], 65)
+
 
 if __name__ == "__main__":
     unittest.main()
