@@ -105,13 +105,15 @@ def get_orderbook_skew(orderbook: dict) -> float:
       - orderbook["orderbook"].yes_dollars_fp / no_dollars_fp  (WebSocket-wrapped _fp)
       - orderbook["orderbook"].yes_dollars / no_dollars        (WebSocket-wrapped _dollars)
       - top-level yes_dollars / no_dollars           (market-level dollar price fields)
-      - orderbook.yes / orderbook.no                 (legacy integer-cents format)
+      - orderbook["orderbook"].yes / no              (legacy integer-cents, wrapped)
+      - top-level yes / no                           (legacy integer-cents, direct)
     """
     try:
         orderbook_data = orderbook.get("orderbook", {})
         orderbook_fp = orderbook.get("orderbook_fp", {})
 
-        # Priority: new fixed-point > older fp > WebSocket-wrapped _dollars > top-level _dollars > legacy integer-cents
+        # Priority: new fixed-point > older fp > WebSocket-wrapped _fp > WebSocket-wrapped _dollars
+        #           > top-level _dollars > legacy integer-cents (wrapped) > legacy integer-cents (direct)
         yes_raw = (
             orderbook_fp.get("yes_dollars_fp")
             or orderbook_fp.get("yes_dollars")
@@ -119,6 +121,7 @@ def get_orderbook_skew(orderbook: dict) -> float:
             or orderbook_data.get("yes_dollars")
             or orderbook.get("yes_dollars")
             or orderbook_data.get("yes", [])
+            or orderbook.get("yes", [])
         )
         no_raw = (
             orderbook_fp.get("no_dollars_fp")
@@ -127,6 +130,7 @@ def get_orderbook_skew(orderbook: dict) -> float:
             or orderbook_data.get("no_dollars")
             or orderbook.get("no_dollars")
             or orderbook_data.get("no", [])
+            or orderbook.get("no", [])
         )
 
         def to_price_cents(raw_price):

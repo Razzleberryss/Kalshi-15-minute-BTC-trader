@@ -222,7 +222,8 @@ class KalshiClient:
             # 3. orderbook["orderbook"].yes_dollars_fp / no_dollars_fp  (WebSocket-wrapped _fp)
             # 4. orderbook["orderbook"].yes_dollars / no_dollars        (WebSocket-wrapped _dollars)
             # 5. top-level yes_dollars / no_dollars on the orderbook response
-            # 6. orderbook.yes / orderbook.no                 (legacy integer-cents format)
+            # 6. orderbook["orderbook"].yes / no              (legacy integer-cents, wrapped)
+            # 7. top-level yes / no                           (legacy integer-cents, direct)
             # All string-price entries are converted to integer cents in parse_bids().
             orderbook_fp = orderbook.get("orderbook_fp", {})
             yes_bids = (
@@ -232,6 +233,7 @@ class KalshiClient:
                 or orderbook_data.get("yes_dollars")
                 or orderbook.get("yes_dollars")
                 or orderbook_data.get("yes", [])
+                or orderbook.get("yes", [])
             )
             no_bids = (
                 orderbook_fp.get("no_dollars_fp")
@@ -240,6 +242,7 @@ class KalshiClient:
                 or orderbook_data.get("no_dollars")
                 or orderbook.get("no_dollars")
                 or orderbook_data.get("no", [])
+                or orderbook.get("no", [])
             )
 
             # Parse bid arrays - support both [price, size] and ["price_string", "count_string"] formats

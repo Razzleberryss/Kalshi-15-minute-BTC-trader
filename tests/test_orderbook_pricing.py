@@ -415,7 +415,7 @@ class TestFixedPointMigration(unittest.TestCase):
             self.client = KalshiClient()
 
     def test_top_level_yes_dollars_no_dollars(self):
-        """Test that top-level yes_dollars/no_dollars fields are parsed (step 3 priority)."""
+        """Test that top-level yes_dollars/no_dollars fields are parsed (step 5 in priority chain)."""
         orderbook = {
             "yes_dollars": [["0.5500", "10"], ["0.5400", "5"]],
             "no_dollars": [["0.4500", "8"]],
