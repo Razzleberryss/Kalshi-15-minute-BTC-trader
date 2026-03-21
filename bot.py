@@ -15,19 +15,30 @@ Loop logic (every LOOP_INTERVAL_SECONDS):
     7. Place order (or log as dry run)
     8. Sleep and repeat
 """
+import json
 import logging
 import signal
 import sys
 import time
 import datetime
 import unittest
+from pathlib import Path
 
 import colorlog
 
 import config
 from kalshi_client import KalshiClient
 from risk_manager import RiskManager
-from strategy import generate_signal, decide_trade, Signal as _Signal
+from strategy import generate_signal, decide_trade, Signal as _Signal, get_btc_momentum, get_orderbook_skew
+
+
+def write_dashboard_state(state: dict) -> None:
+    """Write the current bot cycle state to dashboard_state.json for the dashboard."""
+    path = Path(__file__).parent / "dashboard_state.json"
+    try:
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.debug("Failed to write dashboard_state.json: %s", e)
 
 
 def _compute_trade_contracts(sig_size, budget_contracts):
@@ -384,6 +395,30 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
         risk: RiskManager instance for risk checks
         ws_client: Optional WebSocket client for streaming orderbook data
     """
+    state = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "active_market_ticker": None,
+        "yes_bid": None,
+        "yes_ask": None,
+        "no_bid": None,
+        "no_ask": None,
+        "mid_price": None,
+        "spread": None,
+        "signal_composite": None,
+        "signal_momentum": None,
+        "signal_skew": None,
+        "signal_confidence": None,
+        "position_size": 0,
+        "realized_pnl_cents": 0,
+    }
+    try:
+        return _run_once_impl(client, risk, ws_client, state)
+    finally:
+        write_dashboard_state(state)
+
+
+def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, state: dict = None):
+    """Internal implementation of one bot cycle. Updates *state* in-place for the dashboard."""
     global _last_trade_window_id
 
     # 1. Find the active market
@@ -398,6 +433,9 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
         log.error("Refusing non-BTC-series market: %s", ticker)
         risk._clear_datetime_cache()
         return False
+
+    if state is not None:
+        state["active_market_ticker"] = ticker
 
     # 2. Fetch supporting data
     try:
@@ -514,9 +552,21 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
                  market.get("yes_bid"), market.get("yes_ask"),
                  market.get("no_bid"), market.get("no_ask"))
 
+    # Capture current market prices for dashboard state
+    if state is not None:
+        state["yes_bid"] = market.get("best_yes_bid") or market.get("yes_bid")
+        state["yes_ask"] = market.get("best_yes_ask") or market.get("yes_ask")
+        state["no_bid"] = market.get("best_no_bid") or market.get("no_bid")
+        state["no_ask"] = market.get("best_no_ask") or market.get("no_ask")
+        state["mid_price"] = market.get("mid_price")
+        _yb, _ya = state["yes_bid"], state["yes_ask"]
+        if _yb is not None and _ya is not None:
+            state["spread"] = _ya - _yb
+        state["realized_pnl_cents"] = risk._daily_realized_pnl_cents
+
     # ── reddit_time_delay strategy path ───────────────────────────────────────
     if config.STRATEGY_MODE == "reddit_time_delay":
-        return _run_once_time_delay(client, risk, market, ticker, balance, positions, orderbook)
+        return _run_once_time_delay(client, risk, market, ticker, balance, positions, orderbook, state)
 
     # ── fee_aware_model strategy path (default) ────────────────────────────────
 
@@ -530,6 +580,22 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
         market.get("mid_price"),
     )
     sig = generate_signal(market, orderbook)
+
+    # Capture signal components for dashboard (get_btc_momentum/get_orderbook_skew use caches,
+    # so these calls do not trigger additional API requests).
+    # The 0.6/0.4 weights mirror generate_signal() in strategy.py — kept here so the
+    # dashboard has a pre-computed composite without modifying the strategy API.
+    if state is not None:
+        _momentum = get_btc_momentum()
+        _skew = get_orderbook_skew(orderbook)
+        if _momentum is not None:
+            state["signal_momentum"] = round(_momentum, 4)
+            state["signal_skew"] = round(_skew, 4)
+            state["signal_composite"] = round((0.6 * _momentum) + (0.4 * _skew), 4)
+        if sig is not None:
+            state["signal_confidence"] = round(sig.confidence, 4)
+        _pos = risk.get_open_positions().get(ticker)
+        state["position_size"] = _pos["quantity"] if _pos else 0
     
     # 4. Manage existing positions first
     exit_error = False
@@ -608,6 +674,11 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
     risk.log_entry_trade(ticker, sig.side, contracts, sig.price_cents)
     log.debug("Order id: %s", order_id)
 
+    # Refresh dashboard position size after new trade is recorded
+    if state is not None:
+        _pos = risk.get_open_positions().get(ticker)
+        state["position_size"] = _pos["quantity"] if _pos else 0
+
     # Clear datetime cache at end of cycle
     risk._clear_datetime_cache()
     return True
@@ -621,6 +692,7 @@ def _run_once_time_delay(
     balance: float,
     positions: list,
     orderbook: dict,
+    state: dict = None,
 ) -> bool:
     """
     One bot cycle for the ``reddit_time_delay`` strategy mode.
@@ -735,6 +807,9 @@ def _run_once_time_delay(
             exit_price=exit_price_order,
             exit_reason="time_delay_exit",
         )
+        if state is not None:
+            state["position_size"] = 0
+            state["realized_pnl_cents"] = risk._daily_realized_pnl_cents
         return True
 
     # 5. Handle new entries
@@ -796,6 +871,12 @@ def _run_once_time_delay(
     _last_trade_window_id = current_window_id
     _trades_in_current_window += 1
     log.debug("time_delay order id: %s", order_id)
+
+    # Update dashboard state with final position and PnL
+    if state is not None:
+        _pos = risk.get_open_positions().get(ticker)
+        state["position_size"] = _pos["quantity"] if _pos else 0
+        state["realized_pnl_cents"] = risk._daily_realized_pnl_cents
 
     # Clear datetime cache at end of cycle
     risk._clear_datetime_cache()

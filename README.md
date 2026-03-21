@@ -70,5 +70,43 @@ When running with `DRY_RUN=false` and `KALSHI_ENV=prod`, the bot logs a prominen
 
 ---
 
+## Local Web Dashboard
+
+A simple browser dashboard lets you monitor the bot in real time without reading log files.
+
+### How it works
+
+After every bot cycle `bot.py` writes a small JSON snapshot to `dashboard_state.json` in the project root.
+`dashboard.py` is a tiny Flask server that reads that file and renders an auto-refreshing HTML page.
+
+### Run the dashboard
+
+**Terminal 1 – start the bot:**
+```bash
+python bot.py
+```
+
+**Terminal 2 – start the dashboard:**
+```bash
+python dashboard.py
+```
+
+Open **http://127.0.0.1:8000** in your browser.
+The page auto-refreshes every 5 seconds and shows:
+
+| Field | Description |
+|---|---|
+| Active market | Current Kalshi ticker being traded |
+| YES / NO bid & ask | Best quotes from the orderbook |
+| Mid price | Midpoint of the YES spread |
+| Spread | YES ask − YES bid (in cents) |
+| Signal composite / momentum / skew / confidence | Strategy signal components |
+| Position size | Contracts currently held |
+| Realized PnL today | Today's closed-trade P&L in cents |
+
+> Errors writing or reading `dashboard_state.json` are logged at DEBUG level and **never** crash the bot or the dashboard.
+
+---
+
 ## Disclaimer
 This bot is for educational purposes only. Trading involves risk. Use at your own risk.

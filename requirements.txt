@@ -23,3 +23,6 @@ colorlog>=6.8.0
 
 # WebSocket client for real-time orderbook streaming
 websocket-client>=1.6.0
+
+# Local web dashboard for monitoring the bot
+flask>=3.0.0
