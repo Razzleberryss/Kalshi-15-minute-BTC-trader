@@ -262,9 +262,14 @@ class KalshiClient:
                                 parsed.append([price_cents, size])
                             except (ValueError, TypeError):
                                 continue
-                        # Handle numeric format: [55, 10]
+                        # Handle numeric format: [55, 10] or float dollars: [0.55, 10]
                         else:
-                            parsed.append([int(entry[0]), int(entry[1])])
+                            price = entry[0]
+                            if isinstance(price, float) and 0.0 <= price <= 1.0:
+                                price_cents = int(round(price * 100))
+                            else:
+                                price_cents = int(price)
+                            parsed.append([price_cents, int(entry[1])])
                 return parsed
 
             yes_bids = parse_bids(yes_bids)

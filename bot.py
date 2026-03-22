@@ -333,9 +333,12 @@ def _quotes_from_orderbook(orderbook: dict) -> dict:
                 # Handle string dollar format: "0.55" -> 55 cents
                 if isinstance(price, str):
                     try:
-                        return int(float(price) * 100)
+                        return int(round(float(price) * 100))
                     except (ValueError, TypeError):
                         return None
+                # Handle float dollar format: 0.55 -> 55 cents
+                if isinstance(price, float) and 0.0 <= price <= 1.0:
+                    return int(round(price * 100))
                 # Handle numeric cent format: 55
                 return int(price)
 
