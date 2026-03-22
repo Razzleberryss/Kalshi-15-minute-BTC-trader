@@ -534,6 +534,7 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
     market_mid = float(np.clip((yes_bid + yes_ask) / 2 / 100.0, 0.01, 0.99))
 
     # Apply MAX_SLIPPAGE filter: skip if spread is too wide
+    log.info("DEBUG spread inputs: yes_bid=%s yes_ask=%s", yes_bid, yes_ask)
     spread = (yes_ask - yes_bid) / 100.0
     if spread > config.MAX_SLIPPAGE:
         log.info(
