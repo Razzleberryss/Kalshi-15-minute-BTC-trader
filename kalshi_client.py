@@ -13,7 +13,7 @@ Handles:
 import base64
 import datetime
 import logging
-import time
+import uuid
 from typing import Optional
 
 import requests
@@ -157,14 +157,27 @@ class KalshiClient:
 
     # ── Public API methods ────────────────────────────────────────────────────────────────────────
     def get_balance(self) -> float:
-        """Return available balance in dollars."""
+        """
+        Return available balance in dollars.
+
+        Uses the balance_dollars field (fixed-point string) from API v2.
+        The legacy integer-cents 'balance' field is deprecated.
+        """
         data = self._request("GET", "/portfolio/balance")
-        return data["balance"] / 100  # Kalshi returns cents
+        # API v2 returns balance_dollars as a string (e.g., "123.45")
+        # Fall back to legacy balance/100 if balance_dollars not present
+        balance_str = data.get("balance_dollars")
+        if balance_str is not None:
+            return float(balance_str)
+        # Legacy fallback (integer cents)
+        return data["balance"] / 100
 
     def get_active_btc_market(self) -> Optional[dict]:
         """
         Find the currently open 15-minute BTC market.
         Returns the first active market dict or None.
+
+        Filters out provisional markets (is_provisional=True) as they may be removed.
         """
         params = {
             "series_ticker": config.BTC_SERIES_TICKER,
@@ -179,6 +192,11 @@ class KalshiClient:
         markets = [m for m in markets if self._is_btc_series_market(m.get("ticker", ""))]
         if not markets:
             log.warning("No open markets matched BTC series prefix %s-", config.BTC_SERIES_TICKER)
+            return None
+        # Filter out provisional markets (API v2: is_provisional may be True/False/missing)
+        markets = [m for m in markets if not m.get("is_provisional", False)]
+        if not markets:
+            log.warning("All BTC markets are provisional; skipping trading")
             return None
         markets.sort(key=lambda m: m.get("close_time", ""))
         return markets[0]
@@ -385,15 +403,17 @@ class KalshiClient:
             )
             return None
 
-        # Generate unique client_order_id (timestamp + side + market)
-        client_order_id = f"{int(time.time() * 1000)}_{side}_{market_id}"
+        # Generate unique client_order_id using UUID4 (per Kalshi API best practices)
+        client_order_id = str(uuid.uuid4())
 
+        # Build payload with fixed-point count (count_fp) as required by API v2
+        # The 'type' field is deprecated and no longer required/supported
         payload = {
             "ticker": market_id,
             "action": "buy",
-            "type": "limit",
             "side": side,
             "count": quantity,
+            "count_fp": f"{quantity}.00",  # fixed-point contract quantity
             "client_order_id": client_order_id,
         }
         if side == "yes":
@@ -443,15 +463,17 @@ class KalshiClient:
             )
             return None
 
-        # Generate unique client_order_id (timestamp + side + market)
-        client_order_id = f"{int(time.time() * 1000)}_sell_{side}_{market_id}"
+        # Generate unique client_order_id using UUID4 (per Kalshi API best practices)
+        client_order_id = str(uuid.uuid4())
 
+        # Build payload with fixed-point count (count_fp) as required by API v2
+        # The 'type' field is deprecated and no longer required/supported
         payload = {
             "ticker": market_id,
             "action": "sell",
-            "type": "limit",
             "side": side,
             "count": quantity,
+            "count_fp": f"{quantity}.00",  # fixed-point contract quantity
             "client_order_id": client_order_id,
         }
         if side == "yes":
