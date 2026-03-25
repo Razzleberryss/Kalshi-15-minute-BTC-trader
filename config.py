@@ -110,9 +110,11 @@ MAX_SLIPPAGE: float = float(os.getenv("MAX_SLIPPAGE", "0.08"))
 # Example: 0.12 means 12 cents or 12 percentage points spread
 MAX_SPREAD: float = float(os.getenv("MAX_SPREAD", "0.12"))
 
-# Minimum orderbook depth near mid (total contracts within DEPTH_BAND of mid)
-MIN_YES_DEPTH: int = int(os.getenv("MIN_YES_DEPTH", "50"))
-MIN_NO_DEPTH: int = int(os.getenv("MIN_NO_DEPTH", "50"))
+# Minimum orderbook depth at best YES/NO bid level.
+# Lowered from 50 to 5 so the bot trades on thin-but-real books;
+# raise via MIN_YES_DEPTH / MIN_NO_DEPTH env vars to be more selective.
+MIN_YES_DEPTH: int = int(os.getenv("MIN_YES_DEPTH", "5"))
+MIN_NO_DEPTH: int = int(os.getenv("MIN_NO_DEPTH", "5"))
 
 # Depth band: how many cents/probability points around mid to count depth
 # Example: 0.05 means ±5 cents or ±5 percentage points around mid

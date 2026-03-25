@@ -33,6 +33,10 @@ log = logging.getLogger(__name__)
 # and reduces API calls in a 15-minute market window
 _btc_momentum_cache: dict = {"data": None, "timestamp": 0, "ttl": 300}
 
+# A market whose YES ask ≈ 1.00 and YES bid ≈ 0.00 (spread ≥ this) is considered
+# a ghost / dead book and is always skipped.
+_GHOST_MARKET_SPREAD_THRESHOLD: float = 0.99
+
 
 @dataclass
 class Signal:
@@ -459,6 +463,70 @@ def decide_trade(
     return ("NO_TRADE", None)
 
 
+def _extract_best_bid_depth(raw_array) -> tuple:
+    """
+    Return ``(best_bid_price_dollars, best_bid_count)`` from a raw orderbook side.
+
+    Each entry may be one of:
+      - ``[price, count]`` where *price* is a string dollar (``"0.55"``),
+        a float dollar (``0.55``), or an integer cent value (``55``).
+      - A dict with ``"price"`` / ``"price_dollars"`` and ``"size"`` / ``"count"`` keys.
+
+    Returns ``(None, 0)`` when the array is empty or completely unparseable.
+    """
+    if not raw_array or not isinstance(raw_array, list):
+        return None, 0
+
+    best_price: Optional[float] = None
+    best_count: int = 0
+
+    for entry in raw_array:
+        price = None
+        count = 0
+
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            price, count = entry[0], entry[1]
+        elif isinstance(entry, dict):
+            price = entry.get("price") or entry.get("price_dollars")
+            count = entry.get("size") if entry.get("size") is not None else entry.get("count", 0)
+        else:
+            continue
+
+        # Convert price to the 0-1 dollar range
+        try:
+            if isinstance(price, str):
+                price_d = float(price)
+                if price_d > 1.0:       # treat as cents by mistake
+                    price_d /= 100.0
+            elif isinstance(price, float):
+                price_d = price if price <= 1.0 else price / 100.0
+            elif isinstance(price, int):
+                # Integer prices from Kalshi are always in cents (1=1¢, 99=99¢).
+                # Always divide by 100 to convert to dollars.
+                price_d = price / 100.0
+            else:
+                price_d = float(price)
+                if price_d > 1.0:
+                    price_d /= 100.0
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            count_i = int(float(count))
+        except (TypeError, ValueError):
+            count_i = 0
+
+        if count_i <= 0:
+            continue
+
+        # Keep the highest-priced (best bid) level
+        if best_price is None or price_d > best_price:
+            best_price = price_d
+            best_count = count_i
+
+    return best_price, best_count
+
+
 def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
     """
     Main entry point.  Returns a Signal or None if no trade warranted.
@@ -535,43 +603,93 @@ def generate_signal(market: dict, orderbook: dict) -> Optional[Signal]:
 
     market_mid = float(np.clip((yes_bid + yes_ask) / 2 / 100.0, 0.01, 0.99))
 
-    # Apply MAX_SLIPPAGE filter: skip if spread is too wide
-    log.info("DEBUG spread inputs: yes_bid=%s yes_ask=%s", yes_bid, yes_ask)
-    spread = (yes_ask - yes_bid) / 100.0
-    if spread > config.MAX_SLIPPAGE:
+    # ── Orderbook-based spread and depth ─────────────────────────────────────
+    # Parse the raw orderbook directly so spread and depth are always accurate,
+    # even when the market dict has no pre-computed "spread" or
+    # "yes_depth_near_mid" fields (those are only populated by
+    # get_market_quotes(), which is not called in the main bot loop).
+    _ob_fp   = orderbook.get("orderbook_fp", {}) or {}
+    _ob_data = orderbook.get("orderbook", {}) or {}
+    yes_raw = (
+        _ob_fp.get("yes_dollars_fp")
+        or _ob_fp.get("yes_dollars")
+        or _ob_data.get("yes_dollars_fp")
+        or _ob_data.get("yes_dollars")
+        or orderbook.get("yes_dollars")
+        or _ob_data.get("yes")
+        or orderbook.get("yes")
+    )
+    no_raw = (
+        _ob_fp.get("no_dollars_fp")
+        or _ob_fp.get("no_dollars")
+        or _ob_data.get("no_dollars_fp")
+        or _ob_data.get("no_dollars")
+        or orderbook.get("no_dollars")
+        or _ob_data.get("no")
+        or orderbook.get("no")
+    )
+
+    yes_bid_price, yes_depth = _extract_best_bid_depth(yes_raw)
+    no_bid_price, _          = _extract_best_bid_depth(no_raw)
+
+    # YES ask = 1 − best NO bid (standard Kalshi complementary pricing).
+    # Fall back to the market-dict value when the NO side is empty.
+    if no_bid_price is not None:
+        yes_ask_price = round(1.0 - no_bid_price, 4)
+    elif yes_ask is not None:
+        yes_ask_price = round(yes_ask / 100.0, 4)
+    else:
+        yes_ask_price = None
+
+    # If the YES side of the book is also empty, fall back to market-dict cents.
+    if yes_bid_price is None and yes_bid is not None:
+        yes_bid_price = round(yes_bid / 100.0, 4)
+
+    # market_spread in dollars
+    if yes_bid_price is not None and yes_ask_price is not None:
+        ob_spread = round(yes_ask_price - yes_bid_price, 4)
+    else:
+        ob_spread = None
+
+    log.info(
+        "Orderbook: yes_bid=%.4f yes_ask=%.4f yes_depth=%d spread=%.4f",
+        yes_bid_price or 0.0, yes_ask_price or 0.0, yes_depth, ob_spread or 0.0,
+    )
+
+    # ── Ghost-market guard ────────────────────────────────────────────────────
+    # Skip markets where quotes are effectively 0¢ / 100¢ (dead / ghost books).
+    if ob_spread is not None and ob_spread >= _GHOST_MARKET_SPREAD_THRESHOLD:
         log.info(
-            "Market spread %.4f exceeds MAX_SLIPPAGE threshold %.4f — skipping cycle",
-            spread, config.MAX_SLIPPAGE
+            "Skipping ghost market: spread=%.4f (effectively 0¢/100¢ book) — skipping cycle",
+            ob_spread,
         )
         return None
 
-    # Apply liquidity filters: check spread and depth
-    # Get spread and depth metrics from market dict (populated by get_market_quotes)
-    market_spread = market.get("spread")
-    yes_depth = market.get("yes_depth_near_mid", 0)
-    no_depth = market.get("no_depth_near_mid", 0)
-
-    if market_spread is not None and market_spread > config.MAX_SPREAD:
+    # ── Spread / slippage check ───────────────────────────────────────────────
+    # Prefer the orderbook-derived spread; fall back to market-dict spread so
+    # the filter still fires even when the raw orderbook is unavailable.
+    effective_spread = ob_spread if ob_spread is not None else (yes_ask - yes_bid) / 100.0
+    if effective_spread > config.MAX_SLIPPAGE:
         log.info(
-            "Skipping trade: spread %.2fc (%.1f%%) > MAX_SPREAD %.2fc (%.1f%%)",
-            market_spread * 100, market_spread * 100,
-            config.MAX_SPREAD * 100, config.MAX_SPREAD * 100
+            "Market spread %.4f ($%.2fc) exceeds MAX_SLIPPAGE %.4f — skipping cycle",
+            effective_spread, effective_spread * 100, config.MAX_SLIPPAGE,
         )
         return None
 
+    # ── YES depth check ───────────────────────────────────────────────────────
     if yes_depth < config.MIN_YES_DEPTH:
         log.info(
-            "Skipping trade: YES depth %d < MIN_YES_DEPTH %d",
-            yes_depth, config.MIN_YES_DEPTH
+            "YES depth %d < MIN_YES_DEPTH %d — skipping cycle",
+            yes_depth, config.MIN_YES_DEPTH,
         )
         return None
 
-    if no_depth < config.MIN_NO_DEPTH:
-        log.info(
-            "Skipping trade: NO depth %d < MIN_NO_DEPTH %d",
-            no_depth, config.MIN_NO_DEPTH
-        )
-        return None
+    log.info(
+        "Liquidity OK: spread=%.4f ($%.2fc) <= MAX_SLIPPAGE %.4f, "
+        "yes_depth=%d >= MIN_YES_DEPTH %d — proceeding",
+        effective_spread, effective_spread * 100, config.MAX_SLIPPAGE,
+        yes_depth, config.MIN_YES_DEPTH,
+    )
 
     # Map composite score to a model probability estimate.
     # A composite of ±1.0 shifts the market price by up to ±0.50,
