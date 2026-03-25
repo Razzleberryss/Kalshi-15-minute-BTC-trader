@@ -21,8 +21,9 @@ KALSHI_PRIVATE_KEY_PATH: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "./kalshi_pr
 KALSHI_ENV: str = os.getenv("KALSHI_ENV", "prod").lower()  # 'demo' or 'prod'
 
 # Base URLs (also exposed as KALSHI_BASE_URL for kalshi_client.py)
+# Using api.elections.kalshi.com (v2 production endpoint) per Kalshi API changelog
 if KALSHI_ENV == "prod":
-    BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+    BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 else:
     BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
 
