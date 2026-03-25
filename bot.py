@@ -33,10 +33,16 @@ from strategy import generate_signal, decide_trade, Signal as _Signal, get_btc_m
 
 
 def write_dashboard_state(state: dict) -> None:
-    """Write the current bot cycle state to dashboard_state.json for the dashboard."""
+    """
+    Write the current bot cycle state to dashboard_state.json for the dashboard.
+
+    Uses compact JSON (no indentation) for faster serialization and smaller file size.
+    The dashboard parses JSON programmatically, so human readability is not needed.
+    """
     path = Path(__file__).parent / "dashboard_state.json"
     try:
-        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        # Use compact JSON (no indent) for faster serialization
+        path.write_text(json.dumps(state), encoding="utf-8")
     except Exception as e:
         log.debug("Failed to write dashboard_state.json: %s", e)
 
@@ -73,12 +79,25 @@ class TestComputeTradeContracts(unittest.TestCase):
 # ── Time-delay strategy helpers ───────────────────────────────────────────────────────────────
 
 # Cache for parsed datetime to avoid redundant parsing in position management
+# Bounded to prevent memory leak: keep only the most recent entries
 _parsed_datetime_cache: dict = {}
+_DATETIME_CACHE_MAX_SIZE = 100  # Approx. 1 week of 15-min markets
 
 
 def _parse_close_time(close_time_str: str) -> datetime.datetime:
-    """Parse ISO datetime string and cache result to avoid redundant parsing."""
+    """
+    Parse ISO datetime string and cache result to avoid redundant parsing.
+
+    Cache is bounded (max 100 entries) using FIFO eviction to prevent memory leak.
+    With ~96 markets per day (15-min intervals), this provides ~1 day of cache coverage.
+    """
     if close_time_str not in _parsed_datetime_cache:
+        # Evict oldest entry if cache is full (FIFO eviction)
+        if len(_parsed_datetime_cache) >= _DATETIME_CACHE_MAX_SIZE:
+            # Remove the first (oldest) item
+            oldest_key = next(iter(_parsed_datetime_cache))
+            del _parsed_datetime_cache[oldest_key]
+
         _parsed_datetime_cache[close_time_str] = datetime.datetime.fromisoformat(
             close_time_str.replace("Z", "+00:00")
         )
