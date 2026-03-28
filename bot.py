@@ -30,6 +30,8 @@ import config
 from kalshi_client import KalshiClient
 from risk_manager import RiskManager
 from strategy import generate_signal, decide_trade, Signal as _Signal, get_btc_momentum, get_orderbook_skew
+from agent_decision_engine import AgentAction
+import cli_executor
 
 
 def write_dashboard_state(state: dict) -> None:
@@ -160,6 +162,7 @@ log = logging.getLogger("bot")
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────────────────────────
 _running = True
+_halt_trading = False
 
 # ── Time-delay strategy state ─────────────────────────────────────────────────────────────────────
 # Tracks the window ID of the last trade placed in reddit_time_delay mode so that
@@ -176,6 +179,23 @@ def _handle_signal(sig, frame):
 signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
+# ── CLI execution wrappers ────────────────────────────────────────────────────────────────────
+
+def _cli_buy(ticker, side, count, price_cents, dry_run=False):
+    """Execute a buy order through the CLI with decision-engine retry/escalation."""
+    args = ["buy", "--ticker", ticker, side, str(count), str(price_cents)]
+    if dry_run:
+        args.append("--dry-run")
+    return cli_executor.execute_with_decision_engine(args)
+
+
+def _cli_sell(ticker, side, count, price_cents, dry_run=False):
+    """Execute a sell order through the CLI with decision-engine retry/escalation."""
+    args = ["sell", "--ticker", ticker, side, str(count), str(price_cents)]
+    if dry_run:
+        args.append("--dry-run")
+    return cli_executor.execute_with_decision_engine(args)
+
 # ── Position Management ────────────────────────────────────────────────────────────────────────
 def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, current_signal=None):
     """
@@ -184,6 +204,7 @@ def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, curr
     positions from other bots on the same account are never touched.
     Yields a dict for every position that is exited.
     """
+    global _halt_trading
     ticker = market["ticker"]
     bot_positions = risk.get_open_positions()
 
@@ -252,13 +273,18 @@ def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, curr
             "EXIT %s | side=%s | entry=%dc | exit=%dc | pnl=%+dc | reason=%s",
             ticker, side, entry_price, exit_price, pnl_cents, exit_reason,
         )
-        client.close_position(
-            market_id=ticker,
-            side=side,
-            quantity=count,
-            price=exit_price,
-            dry_run=config.DRY_RUN,
+        outcome, _env = _cli_sell(
+            ticker, side, count, exit_price, dry_run=config.DRY_RUN,
         )
+        if outcome.action == AgentAction.HALT_TRADING:
+            _halt_trading = True
+            return
+        if outcome.action != AgentAction.CONTINUE:
+            log.error(
+                "Position exit failed: action=%s code=%s",
+                outcome.action.value, outcome.code,
+            )
+            return
         yield {
             "market": ticker,
             "side": side,
@@ -441,7 +467,7 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
 
 def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, state: dict = None):
     """Internal implementation of one bot cycle. Updates *state* in-place for the dashboard."""
-    global _last_trade_window_id
+    global _last_trade_window_id, _halt_trading
 
     # 1. Find the active market
     market = client.get_active_btc_market()
@@ -636,6 +662,10 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
         log.error("Error while managing positions: %s", exc, exc_info=True)
         exit_error = True
 
+    if _halt_trading:
+        risk._clear_datetime_cache()
+        return False
+
     # If position management failed, skip new entries to avoid trading with
     # unrecorded/un-exited positions.
     if exit_error:
@@ -674,22 +704,18 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
         contracts * sig.price_cents / 100, sig.reason
     )
 
-    # 7. Execute
-    if sig.side == "yes":
-        order = client.place_order_yes(
-            market_id=ticker,
-            quantity=contracts,
-            price=sig.price_cents,
-            dry_run=config.DRY_RUN,
-        )
-    else:
-        order = client.place_order_no(
-            market_id=ticker,
-            quantity=contracts,
-            price=sig.price_cents,
-            dry_run=config.DRY_RUN,
-        )
-    order_id = order.get("order", {}).get("order_id") if order else None
+    # 7. Execute via CLI + decision engine
+    outcome, envelope = _cli_buy(
+        ticker, sig.side, contracts, sig.price_cents, dry_run=config.DRY_RUN,
+    )
+    if outcome.action == AgentAction.HALT_TRADING:
+        _halt_trading = True
+        risk._clear_datetime_cache()
+        return False
+    if outcome.action != AgentAction.CONTINUE:
+        risk._clear_datetime_cache()
+        return False
+    order_id = envelope.get("result", {}).get("order_id")
 
     # 8. Log to CSV and track the open position
     risk.record_open_position(ticker, sig.side, contracts, sig.price_cents)
@@ -726,7 +752,7 @@ def _run_once_time_delay(
       4. Act on EXIT_POSITION (price-triggered stop-loss from strategy).
       5. Act on ENTER_YES / ENTER_NO (pass through risk manager first).
     """
-    global _last_trade_window_id, _trades_in_current_window
+    global _last_trade_window_id, _trades_in_current_window, _halt_trading
 
     # 1. Safety exits first (stop-loss, take-profit, expiry — always active)
     exit_error = False
@@ -746,6 +772,8 @@ def _run_once_time_delay(
         exit_error = True
 
     if exit_error:
+        return False
+    if _halt_trading:
         return False
 
     # 2. Compute window context
@@ -813,13 +841,14 @@ def _run_once_time_delay(
             "EXIT(time_delay) %s | side=%s | entry=%dc | exit=%dc | pnl=%+dc",
             ticker, side, entry_price, exit_price_order, pnl_cents,
         )
-        client.close_position(
-            market_id=ticker,
-            side=side,
-            quantity=count,
-            price=exit_price_order,
-            dry_run=config.DRY_RUN,
+        outcome, _env = _cli_sell(
+            ticker, side, count, exit_price_order, dry_run=config.DRY_RUN,
         )
+        if outcome.action == AgentAction.HALT_TRADING:
+            _halt_trading = True
+            return False
+        if outcome.action != AgentAction.CONTINUE:
+            return False
         risk.record_closed_position(ticker)
         risk.log_exit_trade(
             market=ticker,
@@ -872,21 +901,17 @@ def _run_once_time_delay(
         contracts * sig_stub.price_cents / 100,
     )
 
-    if side == "yes":
-        order = client.place_order_yes(
-            market_id=ticker,
-            quantity=contracts,
-            price=sig_stub.price_cents,
-            dry_run=config.DRY_RUN,
-        )
-    else:
-        order = client.place_order_no(
-            market_id=ticker,
-            quantity=contracts,
-            price=sig_stub.price_cents,
-            dry_run=config.DRY_RUN,
-        )
-    order_id = order.get("order", {}).get("order_id") if order else None
+    outcome, envelope = _cli_buy(
+        ticker, side, contracts, sig_stub.price_cents, dry_run=config.DRY_RUN,
+    )
+    if outcome.action == AgentAction.HALT_TRADING:
+        _halt_trading = True
+        risk._clear_datetime_cache()
+        return False
+    if outcome.action != AgentAction.CONTINUE:
+        risk._clear_datetime_cache()
+        return False
+    order_id = envelope.get("result", {}).get("order_id")
 
     risk.record_open_position(ticker, side, contracts, sig_stub.price_cents)
     risk.log_entry_trade(ticker, side, contracts, sig_stub.price_cents)
@@ -949,7 +974,7 @@ def main():
     log.info("Bot started. Press Ctrl+C to stop.")
 
     try:
-        while _running:
+        while _running and not _halt_trading:
             try:
                 run_once(client, risk, ws_client=ws_client)
             except KeyboardInterrupt:
@@ -958,6 +983,10 @@ def main():
                 log.error("Unexpected error in main loop: %s", exc, exc_info=True)
                 if not _running:
                     break
+
+            if _halt_trading:
+                log.critical("HALT_TRADING — decision engine stopped the bot.")
+                break
 
             log.debug("Sleeping %ds...", config.LOOP_INTERVAL_SECONDS)
             time.sleep(config.LOOP_INTERVAL_SECONDS)
