@@ -5,7 +5,8 @@ Handles:
   - get_balance()
   - get_active_btc_market() -> finds the live 15-min BTC market
   - get_orderbook(ticker)
-  - get_positions()
+  - get_positions(), contracts_held_on_side(ticker, side)
+  - list_markets(series_ticker, ...), fetch_markets(params) for /markets
   - place_order(ticker, side, count, price_cents, dry_run)
   - sell_position(ticker, side, count, price_cents, dry_run)
   - cancel_order(order_id)
@@ -225,6 +226,29 @@ class KalshiClient:
         data = self._request("GET", "/markets", params=params)
         return data.get("markets", [])
 
+    def list_markets(
+        self,
+        series_ticker: str,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        """
+        List markets for a series via GET /markets.
+
+        Same data as get_markets(); named for callers (e.g. CLI) that should
+        not use the private _request() layer.
+        """
+        return self.get_markets(series_ticker, status=status, limit=limit)
+
+    def fetch_markets(self, params: dict) -> dict:
+        """
+        GET /markets with arbitrary query parameters.
+
+        Returns the full JSON body (including cursor for pagination). Use
+        list_markets / get_markets when you only need the markets list.
+        """
+        return self._request("GET", "/markets", params=params)
+
     def get_orderbook(self, ticker: str) -> dict:
         """Return the full orderbook dict for a market ticker."""
         return self._request("GET", f"/markets/{ticker}/orderbook")
@@ -405,6 +429,26 @@ class KalshiClient:
         """Return list of current open positions."""
         data = self._request("GET", "/portfolio/positions")
         return data.get("market_positions", [])
+
+    def contracts_held_on_side(self, ticker: str, side: str) -> int:
+        """
+        Return non-negative contract count held on side for ticker, or 0.
+
+        Kalshi uses a signed ``position`` per market: positive = long YES,
+        negative = long NO.
+        """
+        side = side.lower()
+        if side not in ("yes", "no"):
+            raise ValueError("side must be 'yes' or 'no'")
+        for p in self.get_positions():
+            if p.get("ticker") != ticker:
+                continue
+            pos = int(p.get("position", 0) or 0)
+            if side == "yes" and pos > 0:
+                return pos
+            if side == "no" and pos < 0:
+                return abs(pos)
+        return 0
 
     def place_order_yes(
         self, market_id: str, quantity: int, price: int, dry_run: bool = True

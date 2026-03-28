@@ -94,7 +94,7 @@ def fetch_historical_markets(
             params["cursor"] = cursor
 
         try:
-            response = client._request("GET", "/markets", params=params)
+            response = client.fetch_markets(params)
         except Exception as exc:
             log.error("Failed to fetch markets: %s", exc)
             raise
