@@ -2,6 +2,9 @@
   "plugins": {
     "gitlab": {
       "enabled": true
+    },
+    "sanity": {
+      "enabled": true
     }
   }
 }
