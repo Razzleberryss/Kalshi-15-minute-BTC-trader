@@ -138,8 +138,17 @@ class RollingSyntheticCfbBuffer:
         while self._samples and self._samples[0][1] < cutoff:
             self._samples.popleft()
 
-    def average(self) -> Optional[float]:
-        """Simple arithmetic mean of buffered prices, or None if empty."""
+    def average(self, _timestamp: Optional[float] = None) -> Optional[float]:
+        """Simple arithmetic mean of buffered prices, or None if empty.
+
+        Evicts stale entries before computing so that callers always get a
+        mean over the live window, even if ``append`` hasn't been called
+        recently.
+
+        ``_timestamp`` defaults to ``time.time()`` and is exposed only for
+        deterministic unit tests — callers should never pass it in production.
+        """
+        self._evict(_timestamp if _timestamp is not None else time.time())
         if not self._samples:
             return None
         return statistics.mean(p for p, _ in self._samples)
@@ -162,7 +171,7 @@ def utc_now_iso() -> str:
 _PRICE_RE = re.compile(r"\$\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)")
 
 
-def extract_price_usd(markdown_text: str) -> Optional[float]:
+def extract_price_usd(markdown_text: Optional[str]) -> Optional[float]:
     """
     Extract the first BTC-range USD price from markdown text.
 

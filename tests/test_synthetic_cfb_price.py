@@ -12,6 +12,8 @@ Covers:
 - immature window lowers confidence
 - rolling buffer: eviction, average, sample_count
 - price_regime classification: aligned / kalshi_ahead / kalshi_behind / uncertain
+  (classify_price_regime helper; regime not injected into bot state until
+   a proper strike/index reference is available)
 """
 
 import os
@@ -142,22 +144,16 @@ class TestScrapePriceSource(unittest.TestCase):
         mock_app.scrape_url.return_value = self._mock_firecrawl_result("$66,870.79")
         MockApp.return_value = mock_app
 
-        with patch.dict("sys.modules", {"firecrawl": MagicMock(FirecrawlApp=MockApp)}):
-            import synthetic_cfb_price as mod  # noqa: F401
-            try:
-                import firecrawl
-                firecrawl.FirecrawlApp = MockApp
-            except ImportError:
-                pass
-
+        # Patch firecrawl in sys.modules so the in-function import resolves to the mock
+        mock_firecrawl = MagicMock()
+        mock_firecrawl.FirecrawlApp = MockApp
+        with patch.dict("sys.modules", {"firecrawl": mock_firecrawl}):
             obs = scrape_price_source("test-key", "TestSource", "https://example.com")
 
-        if obs.ok:
-            self.assertAlmostEqual(obs.price_usd, 66870.79)
-            self.assertIsNone(obs.error)
-        else:
-            self.assertIsNotNone(obs.error)
-            self.assertIsInstance(obs, PriceObservation)
+        self.assertIsInstance(obs, PriceObservation)
+        self.assertTrue(obs.ok)
+        self.assertAlmostEqual(obs.price_usd, 66870.79)
+        self.assertIsNone(obs.error)
 
     def test_failure_on_exception_returns_ok_false(self):
         """If Firecrawl raises an exception the helper returns ok=False, never raises."""
@@ -169,7 +165,9 @@ class TestScrapePriceSource(unittest.TestCase):
 
     def test_failure_returns_valid_observation_structure(self):
         """Even on failure the returned object has the expected fields."""
-        obs = scrape_price_source("", "FailSource", "https://bad.url")
+        # Force ImportError so the test is hermetic (no real network call)
+        with patch.dict("sys.modules", {"firecrawl": None}):
+            obs = scrape_price_source("", "FailSource", "https://bad.url")
         self.assertEqual(obs.source_name, "FailSource")
         self.assertEqual(obs.source_url, "https://bad.url")
         self.assertIsNone(obs.price_usd)
@@ -224,7 +222,7 @@ class TestRollingSyntheticCfbBuffer(unittest.TestCase):
         # Jump 120 s ahead; both previous entries are now stale
         buf.append(67000.0, _timestamp=t0 + 120)
         self.assertEqual(buf.sample_count(), 1)
-        self.assertAlmostEqual(buf.average(), 67000.0)
+        self.assertAlmostEqual(buf.average(_timestamp=t0 + 120), 67000.0)
 
     def test_average_only_uses_in_window_samples(self):
         buf = self._buf(window=60)
@@ -234,7 +232,7 @@ class TestRollingSyntheticCfbBuffer(unittest.TestCase):
         buf.append(66900.0, _timestamp=t0 + 50)   # in window at t0+61
         buf.append(67000.0, _timestamp=t0 + 61)   # the trigger sample, evicts t0
         expected_avg = (66800.0 + 66900.0 + 67000.0) / 3
-        self.assertAlmostEqual(buf.average(), expected_avg)
+        self.assertAlmostEqual(buf.average(_timestamp=t0 + 61), expected_avg)
 
     def test_window_seconds_property(self):
         buf = self._buf(window=90)

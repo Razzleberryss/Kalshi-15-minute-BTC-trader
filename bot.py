@@ -34,7 +34,6 @@ from agent_decision_engine import AgentAction
 import cli_executor
 from synthetic_cfb_price import (
     build_synthetic_cfb_snapshot,
-    classify_price_regime,
     RollingSyntheticCfbBuffer,
 )
 
@@ -535,7 +534,7 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
             "synthetic_cfb_window_seconds": 60,
             "synthetic_cfb_sample_count_60s": 0,
             "synthetic_cfb_confidence": "low",
-            "synthetic_cfb_confidence_score": 0.0,
+            "synthetic_cfb_confidence_score": _cfb_snapshot.confidence_score,
             "synthetic_cfb_spread_bps": None,
             "synthetic_cfb_source_count": 0,
             "synthetic_cfb_scraped_at": _cfb_snapshot.scraped_at,
@@ -669,27 +668,11 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
         if _yb is not None and _ya is not None:
             state["spread"] = _ya - _yb
         state["realized_pnl_cents"] = risk._daily_realized_pnl_cents
-
-        # Compute Kalshi dislocation and price regime vs synthetic CFB avg_60s.
-        # mid_price is in cents (0-100 range); synthetic_cfb_avg_60s is in USD.
-        # We express the Kalshi-scaled BTC reference as:
-        #   cfb_avg * (mid_cents / 100)
-        # and measure its deviation from cfb_avg to get the dislocation.
-        _cfb_avg = _cfb_snapshot.synthetic_cfb_avg_60s
-        _market_mid_cents = state.get("mid_price")
-        if _cfb_avg is not None and _market_mid_cents is not None:
-            kalshi_scaled_cfb = _cfb_avg * (_market_mid_cents / 100.0)
-            dislocation_dollars = kalshi_scaled_cfb - _cfb_avg
-            dislocation_bps = (dislocation_dollars / _cfb_avg) * 10_000.0
-            state["kalshi_dislocation_dollars"] = round(dislocation_dollars, 2)
-            state["kalshi_dislocation_bps"] = round(dislocation_bps, 2)
-            regime = classify_price_regime(kalshi_scaled_cfb, _cfb_avg)
-        else:
-            state["kalshi_dislocation_dollars"] = None
-            state["kalshi_dislocation_bps"] = None
-            regime = "uncertain"
-        _cfb_snapshot.price_regime = regime
-        state["price_regime"] = regime
+        # NOTE: kalshi_dislocation_* and price_regime are intentionally omitted
+        # here. mid_price is a binary contract probability (0-100 cents), not a
+        # BTC/USD level, so comparing it directly against synthetic_cfb_avg_60s
+        # would be semantically incorrect. Dislocation math will be added in a
+        # future patch once a proper strike/index reference is available.
 
     # ── reddit_time_delay strategy path ───────────────────────────────────────
     if config.STRATEGY_MODE == "reddit_time_delay":
