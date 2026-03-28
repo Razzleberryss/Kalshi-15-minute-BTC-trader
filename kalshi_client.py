@@ -202,6 +202,29 @@ class KalshiClient:
         markets.sort(key=lambda m: m.get("close_time", ""))
         return markets[0]
 
+    def get_markets(
+        self,
+        series_ticker: str,
+        status: Optional[str] = None,
+        limit: int = 20,
+    ) -> list:
+        """
+        Return a list of market dicts for the given series ticker.
+
+        Args:
+            series_ticker: The series to filter on, e.g. "KXBTCD".
+            status: Optional market status filter, e.g. "open" or "closed".
+            limit: Maximum number of markets to return (default 20).
+
+        Returns:
+            List of market dicts as returned by the Kalshi /markets endpoint.
+        """
+        params: dict = {"series_ticker": series_ticker, "limit": limit}
+        if status is not None:
+            params["status"] = status
+        data = self._request("GET", "/markets", params=params)
+        return data.get("markets", [])
+
     def get_orderbook(self, ticker: str) -> dict:
         """Return the full orderbook dict for a market ticker."""
         return self._request("GET", f"/markets/{ticker}/orderbook")
