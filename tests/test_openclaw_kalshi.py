@@ -106,6 +106,13 @@ class TestParseIsoDatetime(unittest.TestCase):
     def test_bad_value(self):
         self.assertIsNone(_parse_iso_datetime("not-a-date"))
 
+    def test_naive_datetime_normalized_to_utc(self):
+        """A naive datetime (no tz info) should be returned as UTC-aware."""
+        dt = _parse_iso_datetime("2026-03-28T02:00:00")
+        self.assertIsNotNone(dt)
+        self.assertIsNotNone(dt.tzinfo)
+        self.assertEqual(dt.utcoffset(), datetime.timedelta(0))
+
 
 # ---------------------------------------------------------------------------
 # find_active_market
@@ -247,6 +254,133 @@ class TestFindActiveMarket(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertIn("API error", reason)
+
+    def test_open_empty_falls_back_to_no_status(self):
+        """When status=open returns nothing, the no-status retry should be used."""
+        now = self._now()
+        fallback_market = _make_market(
+            "KXBTCD-28MAR2606",
+            close_time_dt=now + datetime.timedelta(hours=1),
+            open_time_dt=now - datetime.timedelta(minutes=30),
+        )
+        # status=open → empty; no-status → has a market
+        def _get_markets(series, status=None, limit=20):
+            if status == "open":
+                return []
+            return [fallback_market]
+
+        client = MagicMock()
+        client.get_markets.side_effect = _get_markets
+
+        with patch("openclaw_kalshi.datetime") as mock_dt:
+            mock_dt.datetime.now.return_value = now
+            mock_dt.timezone.utc = UTC
+            mock_dt.datetime.fromisoformat = datetime.datetime.fromisoformat
+            mock_dt.timedelta = datetime.timedelta
+            result, reason = find_active_market(client, "KXBTCD")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["ticker"], "KXBTCD-28MAR2606")
+
+    def test_all_provisional_returns_none(self):
+        """When every returned market is provisional, find_active_market returns (None, reason)."""
+        now = self._now()
+        markets = [
+            _make_market(
+                "KXBTCD-PROV1",
+                close_time_dt=now + datetime.timedelta(hours=1),
+                open_time_dt=now - datetime.timedelta(minutes=30),
+                provisional=True,
+            ),
+            _make_market(
+                "KXBTCD-PROV2",
+                close_time_dt=now + datetime.timedelta(hours=2),
+                open_time_dt=now - datetime.timedelta(minutes=10),
+                provisional=True,
+            ),
+        ]
+        client = _mock_client({"open": markets})
+
+        with patch("openclaw_kalshi.datetime") as mock_dt:
+            mock_dt.datetime.now.return_value = now
+            mock_dt.timezone.utc = UTC
+            mock_dt.datetime.fromisoformat = datetime.datetime.fromisoformat
+            mock_dt.timedelta = datetime.timedelta
+            result, reason = find_active_market(client, "KXBTCD")
+
+        self.assertIsNone(result)
+        self.assertIn("provisional", reason)
+
+    def test_all_expired_returns_none(self):
+        """When all markets are expired (close_time in the past), return (None, reason)."""
+        now = self._now()
+        markets = [
+            _make_market(
+                "KXBTCD-OLD1",
+                close_time_dt=now - datetime.timedelta(hours=2),
+                open_time_dt=now - datetime.timedelta(hours=3),
+            ),
+            _make_market(
+                "KXBTCD-OLD2",
+                close_time_dt=now - datetime.timedelta(hours=1),
+                open_time_dt=now - datetime.timedelta(hours=2),
+            ),
+        ]
+        client = _mock_client({"open": markets})
+
+        with patch("openclaw_kalshi.datetime") as mock_dt:
+            mock_dt.datetime.now.return_value = now
+            mock_dt.timezone.utc = UTC
+            mock_dt.datetime.fromisoformat = datetime.datetime.fromisoformat
+            mock_dt.timedelta = datetime.timedelta
+            result, reason = find_active_market(client, "KXBTCD")
+
+        self.assertIsNone(result)
+        self.assertIn("expired", reason)
+
+    def test_markets_with_no_close_time_returns_none(self):
+        """When markets exist but none have close_time, return (None, reason)."""
+        now = self._now()
+        # Markets with no close_time
+        m1 = {"ticker": "KXBTCD-NOTS1", "status": "open", "is_provisional": False}
+        m2 = {"ticker": "KXBTCD-NOTS2", "status": "open", "is_provisional": False}
+        client = _mock_client({"open": [m1, m2]})
+
+        with patch("openclaw_kalshi.datetime") as mock_dt:
+            mock_dt.datetime.now.return_value = now
+            mock_dt.timezone.utc = UTC
+            mock_dt.datetime.fromisoformat = datetime.datetime.fromisoformat
+            mock_dt.timedelta = datetime.timedelta
+            result, reason = find_active_market(client, "KXBTCD")
+
+        self.assertIsNone(result)
+        self.assertIn("expired or missing close_time", reason)
+
+    def test_naive_datetime_treated_as_utc(self):
+        """A close_time without timezone info should be treated as UTC (no TypeError)."""
+        now = self._now()
+        # close_time without timezone offset → naive datetime after fromisoformat
+        naive_close = (now + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        naive_open = (now - datetime.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")
+        m = {
+            "ticker": "KXBTCD-NAIVE",
+            "status": "open",
+            "close_time": naive_close,
+            "open_time": naive_open,
+            "is_provisional": False,
+        }
+        client = _mock_client({"open": [m]})
+
+        with patch("openclaw_kalshi.datetime") as mock_dt:
+            mock_dt.datetime.now.return_value = now
+            mock_dt.timezone.utc = UTC
+            mock_dt.datetime.fromisoformat = datetime.datetime.fromisoformat
+            mock_dt.timedelta = datetime.timedelta
+            # Should not raise TypeError (naive vs aware comparison)
+            result, reason = find_active_market(client, "KXBTCD")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["ticker"], "KXBTCD-NAIVE")
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +553,59 @@ class TestCmdOrderbook(unittest.TestCase):
 
         self.assertEqual(len(result["orderbook"]["orderbook"]["yes"]), 3)
         self.assertEqual(len(result["orderbook"]["orderbook"]["no"]), 3)
+
+    def test_missing_ticker_in_market_returns_error(self):
+        """If the selected market dict has no 'ticker' key, return a structured error."""
+        now = datetime.datetime(2026, 3, 28, 5, 30, tzinfo=UTC)
+        # A market dict that is missing the 'ticker' field
+        market_no_ticker = {
+            "status": "open",
+            "close_time": (now + datetime.timedelta(hours=1)).isoformat(),
+            "open_time": (now - datetime.timedelta(minutes=30)).isoformat(),
+            "is_provisional": False,
+        }
+        client = _mock_client(markets_by_status={"open": [market_no_ticker]})
+        args = self._args(series="KXBTCD")
+
+        with patch("openclaw_kalshi.datetime") as mock_dt:
+            mock_dt.datetime.now.return_value = now
+            mock_dt.timezone.utc = UTC
+            mock_dt.datetime.fromisoformat = datetime.datetime.fromisoformat
+            mock_dt.timedelta = datetime.timedelta
+            result = cmd_orderbook(client, args)
+
+        self.assertIn("error", result)
+        self.assertEqual(result["series"], "KXBTCD")
+        client.get_orderbook.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _positive_int (argparse type helper)
+# ---------------------------------------------------------------------------
+
+class TestPositiveInt(unittest.TestCase):
+    def test_valid_positive(self):
+        from openclaw_kalshi import _positive_int
+        self.assertEqual(_positive_int("5"), 5)
+        self.assertEqual(_positive_int("1"), 1)
+
+    def test_zero_raises(self):
+        from openclaw_kalshi import _positive_int
+        import argparse
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _positive_int("0")
+
+    def test_negative_raises(self):
+        from openclaw_kalshi import _positive_int
+        import argparse
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _positive_int("-1")
+
+    def test_non_integer_raises(self):
+        from openclaw_kalshi import _positive_int
+        import argparse
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _positive_int("abc")
 
 
 if __name__ == "__main__":

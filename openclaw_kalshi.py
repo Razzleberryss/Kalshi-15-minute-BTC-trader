@@ -34,14 +34,21 @@ def _parse_iso_datetime(ts: str) -> Optional[datetime.datetime]:
     """
     Parse an ISO 8601 timestamp string into a timezone-aware datetime (UTC).
 
-    Handles the 'Z' suffix and '+00:00' offset.  Returns None on any parse
-    error so callers can safely skip malformed timestamps.
+    Handles the 'Z' suffix and '+00:00' offset.  If the parsed timestamp is
+    naive (no timezone info), it is interpreted as UTC.  Returns None on any
+    parse error so callers can safely skip malformed timestamps.
     """
     if not ts:
         return None
     try:
         # Replace 'Z' with '+00:00' for consistent fromisoformat() parsing
-        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        # Always return a timezone-aware datetime in UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        else:
+            dt = dt.astimezone(datetime.timezone.utc)
+        return dt
     except (ValueError, AttributeError):
         return None
 
@@ -97,13 +104,18 @@ def find_active_market(
 
     # --- filter out provisional markets --------------------------------------
     non_provisional = [m for m in markets if not m.get("is_provisional", False)]
-    if non_provisional:
-        markets = non_provisional
-        log.debug("%d non-provisional markets after filtering", len(markets))
+    if not non_provisional:
+        reason = f"All markets for series {series!r} are provisional; none selected"
+        log.debug(reason)
+        return None, reason
+    markets = non_provisional
+    log.debug("%d non-provisional markets after filtering", len(markets))
 
     # --- find markets whose window spans now ---------------------------------
-    spanning: list = []
-    future: list = []
+    # Build enriched tuples (market, close_dt) so sorting uses the parsed datetime,
+    # not the raw ISO string (which could have formatting/timezone differences).
+    spanning: list = []   # (market, close_dt)
+    future: list = []     # (market, close_dt)
     for m in markets:
         close_dt = _parse_iso_datetime(m.get("close_time", ""))
         open_dt = _parse_iso_datetime(m.get("open_time", ""))
@@ -113,37 +125,41 @@ def find_active_market(
             continue
 
         if close_dt > now_utc:
-            future.append(m)
+            future.append((m, close_dt))
             # "Spans now" = close is in the future AND (no open_time OR open_time is in the past)
             if open_dt is None or open_dt <= now_utc:
-                spanning.append(m)
+                spanning.append((m, close_dt))
 
     if spanning:
-        spanning.sort(key=lambda m: m.get("close_time", ""))
-        selected = spanning[0]
+        spanning.sort(key=lambda t: t[1])
+        selected = spanning[0][0]
         ticker = selected.get("ticker", "?")
         reason = "nearest active hourly market"
         log.debug("Selected ticker=%s (%s)", ticker, reason)
         return selected, reason
 
     if future:
-        future.sort(key=lambda m: m.get("close_time", ""))
-        selected = future[0]
+        future.sort(key=lambda t: t[1])
+        selected = future[0][0]
         ticker = selected.get("ticker", "?")
         reason = "nearest upcoming market (no contract spans current time)"
         log.debug("Selected ticker=%s (%s)", ticker, reason)
         return selected, reason
 
-    # Markets exist but all have already expired or have no close_time
-    # Return the first one (already filtered to non-provisional) as last resort
-    if markets:
-        selected = markets[0]
-        ticker = selected.get("ticker", "?")
-        reason = "fallback: first market returned by API (close_time unavailable or expired)"
-        log.debug("Selected ticker=%s (%s)", ticker, reason)
-        return selected, reason
-
-    return None, f"No active market found for series {series!r}"
+    # Markets exist but all have already expired or are missing close_time.
+    # Returning an expired/invalid ticker would silently query a dead market,
+    # so surface a structured error instead.
+    tickers = [m.get("ticker", "?") for m in markets]
+    reason = (
+        f"No active market with future close_time found for series {series!r}; "
+        f"{len(markets)} markets returned by API but all are expired or missing close_time. "
+        f"Tickers: {tickers}"
+    )
+    log.warning(
+        "No active market for series %s; all %d markets expired or missing close_time. Tickers=%s",
+        series, len(markets), tickers,
+    )
+    return None, reason
 
 
 # ── Orderbook trimming helper ─────────────────────────────────────────────────
@@ -253,6 +269,11 @@ def cmd_orderbook(client: KalshiClient, args) -> dict:
         }
 
     selected_ticker = market.get("ticker", "")
+    if not selected_ticker:
+        return {
+            "error": "Selected market is missing a ticker field",
+            "series": series,
+        }
     log.debug("Auto-selected ticker=%s reason=%r", selected_ticker, reason)
 
     try:
@@ -275,6 +296,17 @@ def cmd_orderbook(client: KalshiClient, args) -> dict:
 
 
 # ── Argument parser ────────────────────────────────────────────────────────────
+
+def _positive_int(value: str) -> int:
+    """argparse type that accepts only integers >= 1."""
+    try:
+        n = int(value)
+    except (ValueError, TypeError):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a valid integer")
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"limit must be >= 1, got {n}")
+    return n
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -322,10 +354,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     markets_p.add_argument(
         "--limit",
-        type=int,
+        type=_positive_int,
         default=20,
         metavar="N",
-        help="Maximum number of markets to return (default: 20).",
+        help="Maximum number of markets to return (default: 20, must be >= 1).",
     )
 
     # ---- orderbook ------------------------------------------------------------
@@ -358,10 +390,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ob_p.add_argument(
         "--limit",
-        type=int,
+        type=_positive_int,
         default=10,
         metavar="N",
-        help="Maximum number of bid levels per side to include in the output (default: 10).",
+        help="Maximum number of bid levels per side to include in the output (default: 10, must be >= 1).",
     )
 
     return parser
