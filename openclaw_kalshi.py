@@ -29,6 +29,54 @@ Invariant:
   No command may pass a series code to get_orderbook(), get_market(),
   place_order(), or sell_position().  All resolution goes through
   _resolve_ticker_from_args() → resolve_live_market_ticker().
+
+Response contract (agent-facing API):
+  Every CLI invocation writes exactly one JSON object to stdout, then exits.
+  The envelope shape is fixed per ok value — agents MUST NOT probe for
+  optional top-level keys.
+
+  Success (exit 0):
+    {
+      "ok":       true,                       // bool, always true
+      "code":     "SELL_PLACED",              // str, non-empty uppercase
+      "result":   { ... },                    // dict, command-specific payload
+      "warnings": [ {"code": "...", "message": "..."}, ... ]  // list, may be []
+    }
+
+  Failure (exit 1):
+    {
+      "ok":      false,                       // bool, always false
+      "code":    "NO_POSITION",               // str, non-empty uppercase
+      "error":   "human-readable message",    // str, non-empty
+      "details": { ... }                      // dict, may be {}
+    }
+
+  Invariants:
+    - ok is always bool.
+    - code is always a non-empty uppercase string.
+    - Success always has exactly {ok, code, result, warnings}.
+    - Failure always has exactly {ok, code, error, details}.
+    - The two key-sets are disjoint except for ok and code.
+    - warnings is always a list; details is always a dict.
+
+  Success codes:
+    STATUS_OK, MARKETS_OK, ORDERBOOK_OK, ORDERBOOK_EMPTY,
+    BUY_DRY_RUN, BUY_PLACED, SELL_DRY_RUN, SELL_PLACED, SELL_CLAMPED
+
+  Failure codes:
+    STOP_TRADING, LIVE_TRADING_BLOCKED, CONFIG_ERROR, COMMAND_FAILED,
+    INVALID_TICKER, SERIES_RESOLUTION_FAILED, SERIES_RESOLUTION_NETWORK_ERROR,
+    ORDERBOOK_FETCH_ERROR, INVALID_SIDE, INVALID_COUNT, INVALID_PRICE_RANGE,
+    PRICE_OUTSIDE_CONFIG_RANGE, EXCEEDS_MAX_TRADE_DOLLARS, NO_POSITION
+
+  Warning codes:
+    ORDERBOOK_EMPTY, BIDS_UNPARSEABLE, POSITION_CLAMPED
+
+  Buy/sell result fields (fixed set, null when not applicable):
+    action, ticker, side, count, price_cents, client_order_id, mode,
+    order_id (null on dry run), order_status (null on dry run).
+    buy adds: cost_dollars.
+    sell adds: requested_count, position_held.
 """
 
 import argparse
@@ -59,8 +107,8 @@ log = logging.getLogger("openclaw_kalshi")
 def _check_stop_file():
     if STOP_FILE.exists():
         _die(
+            "STOP_TRADING",
             f"STOP_TRADING file exists at {STOP_FILE}. Remove it to resume trading.",
-            error_code="stop_trading",
         )
 
 
@@ -70,27 +118,62 @@ def _check_live_gate(args):
         return True
     if os.environ.get("KALSHI_TRADING_LIVE") != "1":
         _die(
+            "LIVE_TRADING_BLOCKED",
             "Real trading blocked. Set KALSHI_TRADING_LIVE=1 to enable, "
             "or pass --dry-run.",
-            error_code="live_trading_blocked",
         )
     return False
 
 
-def _die(msg: str, code: int = 1, *, error_code: Optional[str] = None):
-    payload = {"error": msg}
-    if error_code is not None:
-        payload["error_code"] = error_code
-    print(json.dumps(payload))
-    sys.exit(code)
+def _success(code: str, result: dict, warnings: list = None) -> dict:
+    """Build a successful response envelope.
+
+    Shape is fixed: {ok, code, result, warnings}.
+    ``warnings`` is always a list (empty when there are none).
+    """
+    return {
+        "ok": True,
+        "code": code,
+        "result": result,
+        "warnings": warnings if warnings else [],
+    }
 
 
-def _out(data: dict, human: bool = False):
+def _failure(code: str, error: str, details: dict = None) -> dict:
+    """Build a failed response envelope.
+
+    Shape is fixed: {ok, code, error, details}.
+    ``details`` is always a dict (empty when there are none).
+    """
+    return {
+        "ok": False,
+        "code": code,
+        "error": error,
+        "details": details if details is not None else {},
+    }
+
+
+def _die(code: str, error: str, *, details: dict = None, exit_code: int = 1):
+    """Print a failure envelope to stdout and terminate."""
+    print(json.dumps(_failure(code, error, details)))
+    sys.exit(exit_code)
+
+
+def _out(envelope: dict, human: bool = False):
+    """Print a response envelope (success or failure) to stdout."""
     if human:
-        for k, v in data.items():
-            print(f"  {k}: {v}")
+        if envelope.get("ok"):
+            print(f"[{envelope['code']}]")
+            for k, v in envelope.get("result", {}).items():
+                print(f"  {k}: {v}")
+            for w in envelope.get("warnings", []):
+                print(f"  WARNING {w.get('code', '')}: {w.get('message', '')}")
+        else:
+            print(f"ERROR [{envelope['code']}]: {envelope.get('error', '')}")
+            for k, v in envelope.get("details", {}).items():
+                print(f"  {k}: {v}")
     else:
-        print(json.dumps(data, indent=2, default=str))
+        print(json.dumps(envelope, indent=2, default=str))
 
 
 def _debug_print(msg: str, debug: bool):
@@ -126,11 +209,11 @@ def _resolve_ticker_from_args(
         _debug_print(f"[{caller}] Using explicit --ticker: {ticker}", debug)
         if not _is_exact_market_ticker(ticker, series):
             _die(
+                "INVALID_TICKER",
                 f"--ticker '{ticker}' is not a valid market ticker for series '{series}'. "
                 f"Expected format: {series}-<date>-<strike> "
                 f"(e.g. {series}-28MAR2615-B85000). "
                 f"To auto-resolve the live market, omit --ticker and use --series.",
-                error_code="invalid_ticker",
             )
         return ticker
 
@@ -138,12 +221,11 @@ def _resolve_ticker_from_args(
     try:
         ticker = resolve_live_market_ticker(client, series, debug=debug)
     except RuntimeError as exc:
-        _die(f"series_resolution_failed: {exc}", error_code="series_resolution_failed")
+        _die("SERIES_RESOLUTION_FAILED", str(exc))
     except Exception as exc:
         _die(
-            f"series_resolution_network_error: Could not reach Kalshi API "
-            f"to resolve series '{series}': {exc}",
-            error_code="series_resolution_network_error",
+            "SERIES_RESOLUTION_NETWORK_ERROR",
+            f"Could not reach Kalshi API to resolve series '{series}': {exc}",
         )
     return ticker
 
@@ -291,7 +373,7 @@ def cmd_status(client: KalshiClient, args):
         "dry_run_config": config.DRY_RUN,
         "stop_file_present": STOP_FILE.exists(),
     }
-    _out(result, args.human)
+    _out(_success("STATUS_OK", result), args.human)
 
 
 def cmd_markets(client: KalshiClient, args):
@@ -324,7 +406,7 @@ def cmd_markets(client: KalshiClient, args):
         )
 
     result = {"series": series, "count": len(rows), "markets": rows}
-    _out(result, args.human)
+    _out(_success("MARKETS_OK", result), args.human)
 
 
 def _parse_bid_array(bid_array):
@@ -389,8 +471,8 @@ def cmd_orderbook(client: KalshiClient, args):
         raw_ob = client.get_orderbook(ticker)
     except Exception as exc:
         _die(
-            f"orderbook_fetch_error: GET /markets/{ticker}/orderbook failed: {exc}",
-            error_code="orderbook_fetch_error",
+            "ORDERBOOK_FETCH_ERROR",
+            f"GET /markets/{ticker}/orderbook failed: {exc}",
         )
 
     _debug_print(f"Raw orderbook response keys: {list(raw_ob.keys())}", debug)
@@ -426,15 +508,19 @@ def cmd_orderbook(client: KalshiClient, args):
             "resolved_from_series": series if not explicit_ticker else None,
             "title": market_data.get("title", ""),
             "close_time": market_data.get("close_time"),
-            "error": "orderbook_empty",
-            "message": (
-                f"Orderbook for '{ticker}' has zero bids on both sides. "
-                f"The market may have just opened or have no liquidity."
-            ),
             "raw_response_keys": list(raw_ob.keys()),
             "orderbook_subkeys": list(ob_data.keys()) if ob_data else [],
         }
-        _out(result, args.human)
+        _out(
+            _success("ORDERBOOK_EMPTY", result, warnings=[{
+                "code": "ORDERBOOK_EMPTY",
+                "message": (
+                    f"Orderbook for '{ticker}' has zero bids on both sides. "
+                    f"The market may have just opened or have no liquidity."
+                ),
+            }]),
+            args.human,
+        )
         return
 
     yes_bids = _parse_bid_array(yes_raw)
@@ -470,13 +556,17 @@ def cmd_orderbook(client: KalshiClient, args):
         "no_bid_levels": len(no_bids),
     }
 
+    warnings = []
     if best_yes_bid is None and best_no_bid is None:
-        result["warning"] = (
-            f"Raw orderbook had {len(yes_raw)} YES and {len(no_raw)} NO entries "
-            f"but none could be parsed. Possible response format mismatch."
-        )
+        warnings.append({
+            "code": "BIDS_UNPARSEABLE",
+            "message": (
+                f"Raw orderbook had {len(yes_raw)} YES and {len(no_raw)} NO entries "
+                f"but none could be parsed. Possible response format mismatch."
+            ),
+        })
 
-    _out(result, args.human)
+    _out(_success("ORDERBOOK_OK", result, warnings or None), args.human)
 
 
 def cmd_buy(client: KalshiClient, args):
@@ -489,28 +579,28 @@ def cmd_buy(client: KalshiClient, args):
     price_cents = args.price
 
     if side not in ("yes", "no"):
-        _die("side must be 'yes' or 'no'", error_code="invalid_side")
+        _die("INVALID_SIDE", "side must be 'yes' or 'no'")
     if count < 1:
-        _die("count must be >= 1", error_code="invalid_count")
+        _die("INVALID_COUNT", "count must be >= 1")
     if not (1 <= price_cents <= 99):
-        _die("price must be 1-99 (cents)", error_code="invalid_price_range")
+        _die("INVALID_PRICE_RANGE", "price must be 1-99 (cents)")
     if not (
         config.MIN_CONTRACT_PRICE_CENTS
         <= price_cents
         <= config.MAX_CONTRACT_PRICE_CENTS
     ):
         _die(
+            "PRICE_OUTSIDE_CONFIG_RANGE",
             f"price {price_cents}c outside allowed range "
             f"[{config.MIN_CONTRACT_PRICE_CENTS}, {config.MAX_CONTRACT_PRICE_CENTS}]",
-            error_code="price_outside_config_range",
         )
 
     cost_dollars = count * price_cents / 100
     if cost_dollars > config.MAX_TRADE_DOLLARS:
         _die(
+            "EXCEEDS_MAX_TRADE_DOLLARS",
             f"Order cost ${cost_dollars:.2f} exceeds MAX_TRADE_DOLLARS "
             f"${config.MAX_TRADE_DOLLARS:.2f}",
-            error_code="exceeds_max_trade_dollars",
         )
 
     client_order_id = str(uuid.uuid4())
@@ -525,19 +615,19 @@ def cmd_buy(client: KalshiClient, args):
         "cost_dollars": cost_dollars,
         "client_order_id": client_order_id,
         "mode": mode,
+        "order_id": None,
+        "order_status": None,
     }
 
     if dry_run:
-        audit["result"] = "simulated"
-        _out(audit, args.human)
+        _out(_success("BUY_DRY_RUN", audit), args.human)
         return
 
-    result = client.place_order(ticker, side, count, price_cents, dry_run=False)
-    order = result.get("order", {}) if result else {}
+    api_result = client.place_order(ticker, side, count, price_cents, dry_run=False)
+    order = api_result.get("order", {}) if api_result else {}
     audit["order_id"] = order.get("order_id")
-    audit["status"] = order.get("status")
-    audit["result"] = "placed"
-    _out(audit, args.human)
+    audit["order_status"] = order.get("status")
+    _out(_success("BUY_PLACED", audit), args.human)
 
 
 def cmd_sell(client: KalshiClient, args):
@@ -550,29 +640,29 @@ def cmd_sell(client: KalshiClient, args):
     price_cents = args.price
 
     if side not in ("yes", "no"):
-        _die("side must be 'yes' or 'no'", error_code="invalid_side")
+        _die("INVALID_SIDE", "side must be 'yes' or 'no'")
     if count < 1:
-        _die("count must be >= 1", error_code="invalid_count")
+        _die("INVALID_COUNT", "count must be >= 1")
     if not (1 <= price_cents <= 99):
-        _die("price must be 1-99 (cents)", error_code="invalid_price_range")
+        _die("INVALID_PRICE_RANGE", "price must be 1-99 (cents)")
     if not (
         config.MIN_CONTRACT_PRICE_CENTS
         <= price_cents
         <= config.MAX_CONTRACT_PRICE_CENTS
     ):
         _die(
+            "PRICE_OUTSIDE_CONFIG_RANGE",
             f"price {price_cents}c outside allowed range "
             f"[{config.MIN_CONTRACT_PRICE_CENTS}, {config.MAX_CONTRACT_PRICE_CENTS}]",
-            error_code="price_outside_config_range",
         )
 
     requested_count = count
     held = client.contracts_held_on_side(ticker, side)
     if held == 0:
         _die(
+            "NO_POSITION",
             f"No open {side.upper()} contracts for {ticker}. "
             f"Use status to inspect positions (YES = long YES, NO = long NO).",
-            error_code="NO_POSITION",
         )
 
     sell_count = min(requested_count, held)
@@ -586,30 +676,38 @@ def cmd_sell(client: KalshiClient, args):
         "ticker": ticker,
         "side": side,
         "count": sell_count,
+        "requested_count": requested_count,
         "price_cents": price_cents,
         "position_held": held,
         "client_order_id": client_order_id,
         "mode": mode,
+        "order_id": None,
+        "order_status": None,
     }
+
+    warnings = []
     if clamped:
-        audit["requested_count"] = requested_count
-        audit["error"] = (
-            f"Requested sell of {requested_count} contracts exceeds {side.upper()} "
-            f"position of {held}; sell clamped to {sell_count}."
-        )
-        audit["error_code"] = "POSITION_TOO_SMALL"
+        warnings.append({
+            "code": "POSITION_CLAMPED",
+            "message": (
+                f"Requested sell of {requested_count} contracts exceeds "
+                f"{side.upper()} position of {held}; clamped to {sell_count}."
+            ),
+        })
 
     if dry_run:
-        audit["result"] = "simulated"
-        _out(audit, args.human)
+        code = "SELL_CLAMPED" if clamped else "SELL_DRY_RUN"
+        _out(_success(code, audit, warnings), args.human)
         return
 
-    result = client.sell_position(ticker, side, sell_count, price_cents, dry_run=False)
-    order = result.get("order", {}) if result else {}
+    api_result = client.sell_position(
+        ticker, side, sell_count, price_cents, dry_run=False,
+    )
+    order = api_result.get("order", {}) if api_result else {}
     audit["order_id"] = order.get("order_id")
-    audit["status"] = order.get("status")
-    audit["result"] = "placed"
-    _out(audit, args.human)
+    audit["order_status"] = order.get("status")
+    code = "SELL_CLAMPED" if clamped else "SELL_PLACED"
+    _out(_success(code, audit, warnings), args.human)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -705,7 +803,7 @@ def main():
     try:
         config.validate()
     except EnvironmentError as e:
-        _die(f"Config error: {e}", error_code="config_error")
+        _die("CONFIG_ERROR", f"Config error: {e}")
 
     client = KalshiClient()
     dispatch = {
@@ -721,11 +819,11 @@ def main():
         raise
     except Exception as exc:
         log.debug("Dispatch failed: %s: %s", type(exc).__name__, exc, exc_info=True)
-        err_obj = {
-            "error": f"Command failed: {exc}",
-            "error_code": type(exc).__name__,
-        }
-        print(json.dumps(err_obj))
+        print(json.dumps(_failure(
+            "COMMAND_FAILED",
+            f"Command failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )))
         sys.exit(1)
 
 
