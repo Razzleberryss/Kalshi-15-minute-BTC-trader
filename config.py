@@ -175,6 +175,13 @@ LOOP_INTERVAL_SECONDS: int = POLL_INTERVAL_SECONDS  # alias used in bot.py
 EXPIRY_EXIT_SECONDS: int = int(os.getenv("EXPIRY_EXIT_SECONDS", "120"))
 
 # =============================================================================
+# Firecrawl – Synthetic CF Benchmarks BTC price estimator
+# =============================================================================
+# API key for the Firecrawl web-scraping service.  When empty the synthetic
+# CFB snapshot is skipped gracefully each cycle (ok=False, degraded context).
+FIRECRAWL_API_KEY: str = os.getenv("FIRECRAWL_API_KEY", "")
+
+# =============================================================================
 # Logging & Output
 # =============================================================================
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()

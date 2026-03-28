@@ -32,6 +32,10 @@ from risk_manager import RiskManager
 from strategy import generate_signal, decide_trade, Signal as _Signal, get_btc_momentum, get_orderbook_skew
 from agent_decision_engine import AgentAction
 import cli_executor
+from synthetic_cfb_price import (
+    build_synthetic_cfb_snapshot,
+    RollingSyntheticCfbBuffer,
+)
 
 
 def write_dashboard_state(state: dict) -> None:
@@ -163,6 +167,11 @@ log = logging.getLogger("bot")
 # ── Graceful shutdown ─────────────────────────────────────────────────────────────────────────────
 _running = True
 _halt_trading = False
+
+# ── Synthetic CFB rolling buffer ─────────────────────────────────────────────────────────────────
+# Persists across bot cycles so that synthetic_cfb_avg_60s accumulates a
+# true 60-second rolling mean — the closest proxy to Kalshi's BRTI settlement ref.
+_cfb_buffer = RollingSyntheticCfbBuffer(window_seconds=60)
 
 # ── Time-delay strategy state ─────────────────────────────────────────────────────────────────────
 # Tracks the window ID of the last trade placed in reddit_time_delay mode so that
@@ -485,6 +494,54 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
     if state is not None:
         state["active_market_ticker"] = ticker
 
+    # 1b. Synthetic CF Benchmarks BTC price estimate
+    # Scrapes public BTC spot sources to build a best-effort BRTI proxy.
+    # The rolling buffer accumulates spot samples to approximate Kalshi's
+    # settlement reference (simple average of the last 60 seconds of BRTI).
+    # Agent context is enriched when ok=True; degraded fields are set on failure.
+    _cfb_snapshot = build_synthetic_cfb_snapshot(config.FIRECRAWL_API_KEY, buffer=_cfb_buffer)
+    if _cfb_snapshot.ok:
+        _cfb_ctx: dict = {
+            "synthetic_cfb_spot": _cfb_snapshot.synthetic_cfb_spot,
+            "synthetic_cfb_mid": _cfb_snapshot.synthetic_cfb_mid,
+            "synthetic_cfb_avg_60s": _cfb_snapshot.synthetic_cfb_avg_60s,
+            "synthetic_cfb_window_seconds": _cfb_snapshot.window_seconds,
+            "synthetic_cfb_sample_count_60s": _cfb_snapshot.sample_count_60s,
+            "synthetic_cfb_confidence": _cfb_snapshot.confidence,
+            "synthetic_cfb_confidence_score": _cfb_snapshot.confidence_score,
+            "synthetic_cfb_spread_bps": _cfb_snapshot.spread_bps,
+            "synthetic_cfb_source_count": _cfb_snapshot.source_count,
+            "synthetic_cfb_scraped_at": _cfb_snapshot.scraped_at,
+        }
+        log.debug(
+            "SyntheticCFB ok | spot=%.2f avg60s=%s conf=%s spread_bps=%.1f sources=%d samples=%d",
+            _cfb_snapshot.synthetic_cfb_spot or 0.0,
+            f"{_cfb_snapshot.synthetic_cfb_avg_60s:.2f}" if _cfb_snapshot.synthetic_cfb_avg_60s else "n/a",
+            _cfb_snapshot.confidence,
+            _cfb_snapshot.spread_bps or 0.0,
+            _cfb_snapshot.source_count,
+            _cfb_snapshot.sample_count_60s,
+        )
+    else:
+        log.warning(
+            "SYNTHETICCFBFAILED | error=%s | continuing cycle with degraded context",
+            _cfb_snapshot.error,
+        )
+        _cfb_ctx = {
+            "synthetic_cfb_spot": None,
+            "synthetic_cfb_mid": None,
+            "synthetic_cfb_avg_60s": None,
+            "synthetic_cfb_window_seconds": 60,
+            "synthetic_cfb_sample_count_60s": 0,
+            "synthetic_cfb_confidence": "low",
+            "synthetic_cfb_confidence_score": _cfb_snapshot.confidence_score,
+            "synthetic_cfb_spread_bps": None,
+            "synthetic_cfb_source_count": 0,
+            "synthetic_cfb_scraped_at": _cfb_snapshot.scraped_at,
+        }
+    if state is not None:
+        state.update(_cfb_ctx)
+
     # 2. Fetch supporting data
     try:
         # Try to get orderbook from WebSocket if available and connected
@@ -611,6 +668,11 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
         if _yb is not None and _ya is not None:
             state["spread"] = _ya - _yb
         state["realized_pnl_cents"] = risk._daily_realized_pnl_cents
+        # NOTE: kalshi_dislocation_* and price_regime are intentionally omitted
+        # here. mid_price is a binary contract probability (0-100 cents), not a
+        # BTC/USD level, so comparing it directly against synthetic_cfb_avg_60s
+        # would be semantically incorrect. Dislocation math will be added in a
+        # future patch once a proper strike/index reference is available.
 
     # ── reddit_time_delay strategy path ───────────────────────────────────────
     if config.STRATEGY_MODE == "reddit_time_delay":
