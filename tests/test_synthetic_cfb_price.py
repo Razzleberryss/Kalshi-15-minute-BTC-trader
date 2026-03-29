@@ -11,9 +11,7 @@ Covers:
 - confidence classification: high / medium / low
 - immature window lowers confidence
 - rolling buffer: eviction, average, sample_count
-- price_regime classification: aligned / kalshi_ahead / kalshi_behind / uncertain
-  (classify_price_regime helper; regime not injected into bot state until
-   a proper strike/index reference is available)
+- empty / missing FIRECRAWL_API_KEY: no network, failed snapshot / observation
 """
 
 import os
@@ -27,9 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from synthetic_cfb_price import (
     PriceObservation,
     RollingSyntheticCfbBuffer,
-    SyntheticCfbSnapshot,
     build_synthetic_cfb_snapshot,
-    classify_price_regime,
     extract_price_usd,
     scrape_price_source,
     utc_now_iso,
@@ -138,13 +134,10 @@ class TestScrapePriceSource(unittest.TestCase):
     def _mock_firecrawl_result(self, price_text: str) -> dict:
         return {"markdown": f"Bitcoin current price: **{price_text}**"}
 
-    @patch("synthetic_cfb_price.FirecrawlApp", create=True)
-    def test_success_returns_parsed_price(self, MockApp):
+    def test_success_returns_parsed_price(self):
         mock_app = MagicMock()
         mock_app.scrape_url.return_value = self._mock_firecrawl_result("$66,870.79")
-        MockApp.return_value = mock_app
-
-        # Patch firecrawl in sys.modules so the in-function import resolves to the mock
+        MockApp = MagicMock(return_value=mock_app)
         mock_firecrawl = MagicMock()
         mock_firecrawl.FirecrawlApp = MockApp
         with patch.dict("sys.modules", {"firecrawl": mock_firecrawl}):
@@ -154,6 +147,13 @@ class TestScrapePriceSource(unittest.TestCase):
         self.assertTrue(obs.ok)
         self.assertAlmostEqual(obs.price_usd, 66870.79)
         self.assertIsNone(obs.error)
+
+    def test_empty_api_key_returns_ok_false_without_firecrawl(self):
+        with patch.dict("sys.modules", {"firecrawl": MagicMock()}):
+            obs = scrape_price_source("", "TestSource", "https://example.com")
+        self.assertFalse(obs.ok)
+        self.assertIsNone(obs.price_usd)
+        self.assertIn("FIRECRAWL", obs.error or "")
 
     def test_failure_on_exception_returns_ok_false(self):
         """If Firecrawl raises an exception the helper returns ok=False, never raises."""
@@ -233,6 +233,15 @@ class TestRollingSyntheticCfbBuffer(unittest.TestCase):
         buf.append(67000.0, _timestamp=t0 + 61)   # the trigger sample, evicts t0
         expected_avg = (66800.0 + 66900.0 + 67000.0) / 3
         self.assertAlmostEqual(buf.average(_timestamp=t0 + 61), expected_avg)
+
+    def test_average_evicts_stale_without_new_append(self):
+        """average() must evict before the mean so idle buffers do not use expired samples."""
+        buf = self._buf(window=60)
+        t0 = 4_000_000.0
+        buf.append(66800.0, _timestamp=t0)
+        buf.append(66900.0, _timestamp=t0 + 10)
+        self.assertIsNone(buf.average(_timestamp=t0 + 120))
+        self.assertEqual(buf.sample_count(), 0)
 
     def test_window_seconds_property(self):
         buf = self._buf(window=90)
@@ -347,12 +356,13 @@ class TestBuildSyntheticCfbSnapshot(unittest.TestCase):
         self.assertEqual(snap.sample_count_60s, 3)
         self.assertIsNotNone(snap.synthetic_cfb_avg_60s)
 
-    def test_price_regime_defaults_to_uncertain(self):
-        prices = [66800.0, 66820.0, 66850.0, 66870.0, 66890.0]
-        with patch("synthetic_cfb_price.scrape_price_source", side_effect=_mock_scrape(prices)):
-            snap = build_synthetic_cfb_snapshot("test-key")
-        # price_regime is "uncertain" by default; bot.py fills it after Kalshi mid is known
-        self.assertEqual(snap.price_regime, "uncertain")
+    def test_empty_api_key_returns_failed_snapshot_without_scraping(self):
+        with patch("synthetic_cfb_price.scrape_price_source") as mock_scrape:
+            snap = build_synthetic_cfb_snapshot("", buffer=None)
+        mock_scrape.assert_not_called()
+        self.assertFalse(snap.ok)
+        self.assertIsNotNone(snap.error)
+        self.assertIn("FIRECRAWL", snap.error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -461,78 +471,6 @@ class TestClassifyConfidence(unittest.TestCase):
     def test_boundary_just_over_high_threshold_drops_to_medium(self):
         label, score = _classify_confidence(source_count=4, spread_bps=11.0)
         self.assertEqual(label, "medium")
-
-
-# ---------------------------------------------------------------------------
-# classify_price_regime
-# ---------------------------------------------------------------------------
-
-class TestClassifyPriceRegime(unittest.TestCase):
-
-    def test_aligned_within_threshold(self):
-        # Kalshi reference exactly equal → aligned
-        self.assertEqual(classify_price_regime(66850.0, 66850.0, threshold_bps=10.0), "aligned")
-
-    def test_aligned_small_deviation(self):
-        # 5 bps deviation → aligned (within 10 bps threshold)
-        cfb_avg = 66850.0
-        small_delta = cfb_avg * 0.0005  # 5 bps
-        self.assertEqual(
-            classify_price_regime(cfb_avg + small_delta, cfb_avg, threshold_bps=10.0),
-            "aligned",
-        )
-
-    def test_kalshi_ahead_above_threshold(self):
-        cfb_avg = 66850.0
-        delta = cfb_avg * 0.002  # 20 bps above avg
-        self.assertEqual(
-            classify_price_regime(cfb_avg + delta, cfb_avg, threshold_bps=10.0),
-            "kalshi_ahead",
-        )
-
-    def test_kalshi_behind_below_threshold(self):
-        cfb_avg = 66850.0
-        delta = cfb_avg * 0.002  # 20 bps below avg
-        self.assertEqual(
-            classify_price_regime(cfb_avg - delta, cfb_avg, threshold_bps=10.0),
-            "kalshi_behind",
-        )
-
-    def test_uncertain_when_kalshi_reference_none(self):
-        self.assertEqual(classify_price_regime(None, 66850.0, threshold_bps=10.0), "uncertain")
-
-    def test_uncertain_when_cfb_avg_none(self):
-        self.assertEqual(classify_price_regime(66850.0, None, threshold_bps=10.0), "uncertain")
-
-    def test_uncertain_when_both_none(self):
-        self.assertEqual(classify_price_regime(None, None, threshold_bps=10.0), "uncertain")
-
-    def test_uncertain_when_cfb_avg_zero(self):
-        self.assertEqual(classify_price_regime(66850.0, 0.0, threshold_bps=10.0), "uncertain")
-
-    def test_custom_threshold_bps(self):
-        cfb_avg = 66850.0
-        delta = cfb_avg * 0.0015  # 15 bps above avg
-        # With 10 bps threshold: kalshi_ahead
-        self.assertEqual(
-            classify_price_regime(cfb_avg + delta, cfb_avg, threshold_bps=10.0),
-            "kalshi_ahead",
-        )
-        # With 20 bps threshold: aligned
-        self.assertEqual(
-            classify_price_regime(cfb_avg + delta, cfb_avg, threshold_bps=20.0),
-            "aligned",
-        )
-
-    def test_exactly_at_threshold_boundary(self):
-        # Use a delta that is unambiguously <= threshold when computed as bps
-        cfb_avg = 66850.0
-        # 9.9 bps — comfortably within the 10 bps threshold
-        delta = cfb_avg * (9.9 / 10_000.0)
-        self.assertEqual(
-            classify_price_regime(cfb_avg + delta, cfb_avg, threshold_bps=10.0),
-            "aligned",
-        )
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ feed access this module builds a best-effort synthetic estimate by:
 Public entry points
 -------------------
 build_synthetic_cfb_snapshot(api_key, buffer, outlier_threshold_bps) -> SyntheticCfbSnapshot
-classify_price_regime(kalshi_reference_usd, cfb_avg_60s, threshold_bps) -> str
 
 Helper functions (also tested individually)
 -------------------------------------------
@@ -78,7 +77,6 @@ class SyntheticCfbSnapshot:
     synthetic_cfb_avg_60s: Optional[float]
     sample_count_60s: int
     window_seconds: int
-    price_regime: str
     # Cross-source quality metrics
     source_count: int
     min_price: Optional[float]
@@ -205,6 +203,16 @@ def scrape_price_source(
     ``PriceObservation`` with ``ok=False``.
     """
     now = utc_now_iso()
+    if not (api_key or "").strip():
+        return PriceObservation(
+            source_name=source_name,
+            source_url=source_url,
+            price_usd=None,
+            scraped_at=now,
+            ok=False,
+            error="FIRECRAWL_API_KEY not set or empty",
+            raw_excerpt="",
+        )
     try:
         from firecrawl import FirecrawlApp  # type: ignore[import]
         app = FirecrawlApp(api_key=api_key)
@@ -293,33 +301,6 @@ def _apply_window_confidence_cap(
 
 
 # ---------------------------------------------------------------------------
-# Price regime classification
-# ---------------------------------------------------------------------------
-
-def classify_price_regime(
-    kalshi_reference_usd: Optional[float],
-    cfb_avg_60s: Optional[float],
-    threshold_bps: float = 10.0,
-) -> str:
-    """
-    Classify the relationship between the Kalshi-derived reference price and
-    the 60-second rolling synthetic CFB average.
-
-    Returns one of:
-      ``"aligned"``       – Kalshi reference is within *threshold_bps* of avg_60s
-      ``"kalshi_ahead"``  – Kalshi reference is meaningfully above avg_60s
-      ``"kalshi_behind"`` – Kalshi reference is meaningfully below avg_60s
-      ``"uncertain"``     – insufficient data (either input is None)
-    """
-    if kalshi_reference_usd is None or cfb_avg_60s is None or cfb_avg_60s == 0.0:
-        return "uncertain"
-    deviation_bps = (kalshi_reference_usd - cfb_avg_60s) / cfb_avg_60s * 10_000.0
-    if abs(deviation_bps) <= threshold_bps:
-        return "aligned"
-    return "kalshi_ahead" if deviation_bps > 0 else "kalshi_behind"
-
-
-# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -361,7 +342,6 @@ def build_synthetic_cfb_snapshot(
             synthetic_cfb_avg_60s=avg_60s,
             sample_count_60s=sample_count_60s,
             window_seconds=buffer.window_seconds if buffer is not None else 60,
-            price_regime="uncertain",
             source_count=source_count,
             min_price=None,
             max_price=None,
@@ -374,6 +354,9 @@ def build_synthetic_cfb_snapshot(
             ok=False,
             error=error,
         )
+
+    if not (api_key or "").strip():
+        return _failed_snapshot(0, "FIRECRAWL_API_KEY not set or empty")
 
     try:
         for source_name, source_url in BTC_SOURCES:
@@ -434,7 +417,6 @@ def build_synthetic_cfb_snapshot(
             synthetic_cfb_avg_60s=avg_60s,
             sample_count_60s=sample_count_60s,
             window_seconds=window_seconds,
-            price_regime="uncertain",  # bot.py fills this after computing Kalshi reference
             source_count=len(clean),
             min_price=min_price,
             max_price=max_price,
@@ -456,7 +438,6 @@ def build_synthetic_cfb_snapshot(
             synthetic_cfb_avg_60s=None,
             sample_count_60s=0,
             window_seconds=buffer.window_seconds if buffer is not None else 60,
-            price_regime="uncertain",
             source_count=0,
             min_price=None,
             max_price=None,

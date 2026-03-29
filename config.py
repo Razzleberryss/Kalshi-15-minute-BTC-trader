@@ -81,9 +81,9 @@ MAX_TRADES_PER_WINDOW: int = int(os.getenv("MAX_TRADES_PER_WINDOW", "1"))
 # Strategy / Signal
 # =============================================================================
 # BTC_SERIES_TICKER: Kalshi 15-min BTC Up/Down series.
-# The live series ticker is BTCZ (e.g. BTCZ-25DEC3100-T3PM).
+# The live series ticker= KXBTC15M
 # Override in .env if Kalshi changes the series name.
-BTC_SERIES_TICKER: str = os.getenv("BTC_SERIES_TICKER", "BTCZ")
+BTC_SERIES_TICKER: str = os.getenv("BTC_SERIES_TICKER", "KXBTC15M")
 BTC_TICKER: str = os.getenv("BTC_TICKER", "BTC-USD")  # yfinance symbol
 MOMENTUM_LOOKBACK_BARS: int = int(os.getenv("MOMENTUM_LOOKBACK_BARS", "5"))
 

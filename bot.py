@@ -531,12 +531,12 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
             "synthetic_cfb_spot": None,
             "synthetic_cfb_mid": None,
             "synthetic_cfb_avg_60s": None,
-            "synthetic_cfb_window_seconds": 60,
+            "synthetic_cfb_window_seconds": _cfb_snapshot.window_seconds,
             "synthetic_cfb_sample_count_60s": 0,
-            "synthetic_cfb_confidence": "low",
+            "synthetic_cfb_confidence": _cfb_snapshot.confidence,
             "synthetic_cfb_confidence_score": _cfb_snapshot.confidence_score,
-            "synthetic_cfb_spread_bps": None,
-            "synthetic_cfb_source_count": 0,
+            "synthetic_cfb_spread_bps": _cfb_snapshot.spread_bps,
+            "synthetic_cfb_source_count": _cfb_snapshot.source_count,
             "synthetic_cfb_scraped_at": _cfb_snapshot.scraped_at,
         }
     if state is not None:
@@ -668,11 +668,9 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
         if _yb is not None and _ya is not None:
             state["spread"] = _ya - _yb
         state["realized_pnl_cents"] = risk._daily_realized_pnl_cents
-        # NOTE: kalshi_dislocation_* and price_regime are intentionally omitted
-        # here. mid_price is a binary contract probability (0-100 cents), not a
-        # BTC/USD level, so comparing it directly against synthetic_cfb_avg_60s
-        # would be semantically incorrect. Dislocation math will be added in a
-        # future patch once a proper strike/index reference is available.
+        # NOTE: kalshi_dislocation_* (mid vs synthetic CFB) is intentionally omitted.
+        # mid_price is contract probability in cents, not a BTC/USD level; dislocation
+        # vs synthetic_cfb_* requires a proper strike/index reference (future work).
 
     # ── reddit_time_delay strategy path ───────────────────────────────────────
     if config.STRATEGY_MODE == "reddit_time_delay":
