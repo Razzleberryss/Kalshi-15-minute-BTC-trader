@@ -341,9 +341,14 @@ class KalshiClient:
             yes_bids = parse_bids(yes_bids)
             no_bids = parse_bids(no_bids)
 
-            # Extract best bids (highest price = index 0, as they're sorted descending)
-            best_yes_bid = yes_bids[0][0] if yes_bids else None
-            best_no_bid = no_bids[0][0] if no_bids else None
+            # Kalshi arrays are sorted ascending; best (highest) bid is the last entry.
+            # Use max() for robustness regardless of actual sort order.
+            _yes_best = max(yes_bids, key=lambda x: x[0]) if yes_bids else None
+            _no_best = max(no_bids, key=lambda x: x[0]) if no_bids else None
+            best_yes_bid = _yes_best[0] if _yes_best else None
+            best_yes_bid_size = _yes_best[1] if _yes_best else 0
+            best_no_bid = _no_best[0] if _no_best else None
+            best_no_bid_size = _no_best[1] if _no_best else 0
 
             # Compute asks from the complementary side
             # YES ask = what you pay to buy YES = 100 - (what NO buyers are willing to pay)
@@ -407,6 +412,8 @@ class KalshiClient:
                 "best_yes_ask": best_yes_ask,
                 "best_no_bid": best_no_bid,
                 "best_no_ask": best_no_ask,
+                "best_yes_bid_size": best_yes_bid_size,
+                "best_no_bid_size": best_no_bid_size,
                 "mid_price": mid_price,
                 "spread": spread,
                 "yes_depth_near_mid": yes_depth_near_mid,
@@ -419,6 +426,8 @@ class KalshiClient:
                 "best_yes_ask": None,
                 "best_no_bid": None,
                 "best_no_ask": None,
+                "best_yes_bid_size": 0,
+                "best_no_bid_size": 0,
                 "mid_price": None,
                 "spread": None,
                 "yes_depth_near_mid": 0,

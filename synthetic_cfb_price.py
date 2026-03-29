@@ -216,7 +216,9 @@ def scrape_price_source(
     try:
         from firecrawl import FirecrawlApp  # type: ignore[import]
         app = FirecrawlApp(api_key=api_key)
-        result = app.scrape_url(source_url, formats=["markdown"])
+        # firecrawl-py v4+ renamed scrape_url → scrape; fall back for older versions
+        _scrape = getattr(app, "scrape", None) or getattr(app, "scrape_url")
+        result = _scrape(source_url, formats=["markdown"])
         markdown: str = ""
         if isinstance(result, dict):
             markdown = result.get("markdown") or result.get("content") or ""

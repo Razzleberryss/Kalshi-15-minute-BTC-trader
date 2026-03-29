@@ -62,7 +62,7 @@ class TestSpreadAndDepthCalculations(unittest.TestCase):
                 "no": [
                     [47, 25],  # 47c - this is the bid, so it's the NO price
                     [46, 30],  # 46c
-                    [60, 100],  # Outside band
+                    [20, 100],  # Far outside band (below lower bound)
                 ],
             }
         }

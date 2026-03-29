@@ -616,8 +616,14 @@ def cmd_orderbook(client: KalshiClient, args):
     yes_bids = _parse_bid_array(yes_raw)
     no_bids = _parse_bid_array(no_raw)
 
-    best_yes_bid = yes_bids[0][0] if yes_bids else None
-    best_no_bid = no_bids[0][0] if no_bids else None
+    # Kalshi arrays are sorted ascending; best (highest) bid is the last entry.
+    _yes_best = max(yes_bids, key=lambda x: x[0]) if yes_bids else None
+    _no_best = max(no_bids, key=lambda x: x[0]) if no_bids else None
+    best_yes_bid = _yes_best[0] if _yes_best else None
+    best_yes_bid_size = _yes_best[1] if _yes_best else 0
+    best_no_bid = _no_best[0] if _no_best else None
+    best_no_bid_size = _no_best[1] if _no_best else 0
+    # Asks are derived: yes_ask = 1.00 - best_no_bid, no_ask = 1.00 - best_yes_bid
     best_yes_ask = (100 - best_no_bid) if best_no_bid is not None else None
     best_no_ask = (100 - best_yes_bid) if best_yes_bid is not None else None
 
@@ -640,6 +646,8 @@ def cmd_orderbook(client: KalshiClient, args):
         "best_yes_ask": best_yes_ask,
         "best_no_bid": best_no_bid,
         "best_no_ask": best_no_ask,
+        "best_yes_bid_size": best_yes_bid_size,
+        "best_no_bid_size": best_no_bid_size,
         "mid_price": mid_price,
         "spread": spread,
         "yes_bid_levels": len(yes_bids),

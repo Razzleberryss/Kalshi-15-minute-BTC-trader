@@ -515,5 +515,190 @@ class TestFixedPointMigration(unittest.TestCase):
         self.assertEqual(quotes["best_no_bid"], 40)
 
 
+class TestAscendingSortOrderbookFp(unittest.TestCase):
+    """Test that ascending-sorted orderbook_fp arrays are parsed correctly.
+
+    Kalshi API returns orderbook_fp.yes_dollars / no_dollars sorted ascending
+    by price. The best (highest) bid is the LAST element, not the first.
+    """
+
+    def setUp(self):
+        with patch.object(KalshiClient, '_load_private_key', return_value=None):
+            self.client = KalshiClient()
+
+    def test_ascending_orderbook_fp_both_sides(self):
+        """Realistic ascending-sorted orderbook_fp with both YES and NO bids."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars": [
+                    ["0.42", "5"],
+                    ["0.44", "10"],
+                    ["0.46", "15"],
+                ],
+                "no_dollars": [
+                    ["0.50", "8"],
+                    ["0.52", "12"],
+                    ["0.54", "20"],
+                ],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        # Best YES bid = last entry = 46c, size = 15
+        self.assertEqual(quotes["best_yes_bid"], 46)
+        self.assertEqual(quotes["best_yes_bid_size"], 15)
+        # Best NO bid = last entry = 54c, size = 20
+        self.assertEqual(quotes["best_no_bid"], 54)
+        self.assertEqual(quotes["best_no_bid_size"], 20)
+        # Derived asks: yes_ask = 100 - 54 = 46, no_ask = 100 - 46 = 54
+        self.assertEqual(quotes["best_yes_ask"], 46)
+        self.assertEqual(quotes["best_no_ask"], 54)
+        # Mid = (46 + 46) // 2 = 46
+        self.assertEqual(quotes["mid_price"], 46)
+
+    def test_ascending_orderbook_fp_single_entry_each(self):
+        """Single entry on each side, ascending order trivially works."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars": [["0.60", "25"]],
+                "no_dollars": [["0.38", "30"]],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        self.assertEqual(quotes["best_yes_bid"], 60)
+        self.assertEqual(quotes["best_yes_bid_size"], 25)
+        self.assertEqual(quotes["best_no_bid"], 38)
+        self.assertEqual(quotes["best_no_bid_size"], 30)
+        # Derived asks
+        self.assertEqual(quotes["best_yes_ask"], 62)  # 100 - 38
+        self.assertEqual(quotes["best_no_ask"], 40)   # 100 - 60
+
+    def test_ascending_orderbook_fp_yes_only(self):
+        """Only YES side present; NO ask derived from YES bid."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars": [["0.30", "5"], ["0.35", "10"], ["0.40", "20"]],
+                "no_dollars": [],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        self.assertEqual(quotes["best_yes_bid"], 40)
+        self.assertEqual(quotes["best_yes_bid_size"], 20)
+        self.assertIsNone(quotes["best_no_bid"])
+        self.assertEqual(quotes["best_no_bid_size"], 0)
+        # NO ask = 100 - 40 = 60
+        self.assertEqual(quotes["best_no_ask"], 60)
+        # YES ask inferred (40 + 1 = 41) since NO side is empty
+        self.assertEqual(quotes["best_yes_ask"], 41)
+
+    def test_ascending_orderbook_fp_no_only(self):
+        """Only NO side present; YES ask derived from NO bid."""
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars": [],
+                "no_dollars": [["0.20", "5"], ["0.25", "10"], ["0.30", "15"]],
+            }
+        }
+
+        with patch.object(self.client, 'get_orderbook', return_value=orderbook):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        self.assertIsNone(quotes["best_yes_bid"])
+        self.assertEqual(quotes["best_yes_bid_size"], 0)
+        self.assertEqual(quotes["best_no_bid"], 30)
+        self.assertEqual(quotes["best_no_bid_size"], 15)
+        # YES ask = 100 - 30 = 70
+        self.assertEqual(quotes["best_yes_ask"], 70)
+        # NO ask inferred (30 + 1 = 31) since YES side is empty
+        self.assertEqual(quotes["best_no_ask"], 31)
+
+    def test_bid_sizes_in_error_fallback(self):
+        """Error fallback should include zero bid sizes."""
+        with patch.object(self.client, 'get_orderbook', side_effect=Exception("API Error")):
+            quotes = self.client.get_market_quotes("TEST-TICKER")
+
+        self.assertEqual(quotes["best_yes_bid_size"], 0)
+        self.assertEqual(quotes["best_no_bid_size"], 0)
+
+
+class TestQuotesFromOrderbookAscending(unittest.TestCase):
+    """Test bot.py _quotes_from_orderbook with ascending-sorted REST data."""
+
+    def test_ascending_rest_orderbook_fp(self):
+        """REST API orderbook_fp format with ascending sort order."""
+        from bot import _quotes_from_orderbook
+
+        orderbook = {
+            "orderbook_fp": {
+                "yes_dollars": [
+                    ["0.42", "5"],
+                    ["0.44", "10"],
+                    ["0.46", "15"],
+                ],
+                "no_dollars": [
+                    ["0.50", "8"],
+                    ["0.52", "12"],
+                    ["0.54", "20"],
+                ],
+            }
+        }
+
+        quotes = _quotes_from_orderbook(orderbook)
+
+        self.assertEqual(quotes["best_yes_bid"], 46)
+        self.assertEqual(quotes["best_yes_bid_size"], 15)
+        self.assertEqual(quotes["best_no_bid"], 54)
+        self.assertEqual(quotes["best_no_bid_size"], 20)
+        self.assertEqual(quotes["best_yes_ask"], 46)   # 100 - 54
+        self.assertEqual(quotes["best_no_ask"], 54)    # 100 - 46
+
+    def test_descending_websocket_orderbook(self):
+        """WebSocket normalized format with descending sort order."""
+        from bot import _quotes_from_orderbook
+
+        orderbook = {
+            "orderbook": {
+                "yes": [[55, 10], [54, 5], [53, 3]],
+                "no": [[45, 8], [44, 3]],
+            }
+        }
+
+        quotes = _quotes_from_orderbook(orderbook)
+
+        # max() should correctly find 55 regardless of sort order
+        self.assertEqual(quotes["best_yes_bid"], 55)
+        self.assertEqual(quotes["best_yes_bid_size"], 10)
+        self.assertEqual(quotes["best_no_bid"], 45)
+        self.assertEqual(quotes["best_no_bid_size"], 8)
+        self.assertEqual(quotes["best_yes_ask"], 55)   # 100 - 45
+        self.assertEqual(quotes["best_no_ask"], 45)    # 100 - 55
+
+    def test_mixed_format_still_finds_max(self):
+        """Even with non-monotonic entries, max() finds the best bid."""
+        from bot import _quotes_from_orderbook
+
+        orderbook = {
+            "orderbook": {
+                "yes": [[40, 3], [55, 7], [48, 5]],
+                "no": [[30, 2], [45, 6], [35, 4]],
+            }
+        }
+
+        quotes = _quotes_from_orderbook(orderbook)
+
+        self.assertEqual(quotes["best_yes_bid"], 55)
+        self.assertEqual(quotes["best_yes_bid_size"], 7)
+        self.assertEqual(quotes["best_no_bid"], 45)
+        self.assertEqual(quotes["best_no_bid_size"], 6)
+
+
 if __name__ == "__main__":
     unittest.main()

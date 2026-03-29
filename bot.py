@@ -319,6 +319,8 @@ def _quotes_from_orderbook(orderbook: dict) -> dict:
         "best_yes_ask": None,
         "best_no_bid": None,
         "best_no_ask": None,
+        "best_yes_bid_size": 0,
+        "best_no_bid_size": 0,
         "mid_price": None,
     }
 
@@ -381,36 +383,63 @@ def _quotes_from_orderbook(orderbook: dict) -> dict:
         yes_bids = extract_bids(yes_array)
         no_bids = extract_bids(no_array)
 
-        def _best_price(entries):
-            """Extract best price from bid/ask entries in various formats."""
+        def _best_bid(entries):
+            """Find the best (highest-priced) bid and its size from bid entries.
+
+            Iterates all entries to find the max, handling ascending (REST API)
+            and descending (WebSocket normalized) sort orders.
+            """
             if not entries:
-                return None
+                return None, 0
 
-            top = entries[0]
+            best_p = None
+            best_s = 0
+            for entry in entries:
+                raw_price = None
+                raw_size = 0
 
-            # Format 1: Dict with "price" field
-            if isinstance(top, dict):
-                return top.get("price")
+                if isinstance(entry, dict):
+                    raw_price = entry.get("price")
+                    raw_size = entry.get("size", 0)
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 1:
+                    raw_price = entry[0]
+                    raw_size = entry[1] if len(entry) >= 2 else 0
+                else:
+                    continue
 
-            # Format 2: Array [price, size] where price could be int or string
-            if isinstance(top, (list, tuple)) and len(top) >= 1:
-                price = top[0]
-                # Handle string dollar format: "0.55" -> 55 cents
-                if isinstance(price, str):
+                if isinstance(raw_price, str):
                     try:
-                        return int(round(float(price) * 100))
+                        p = int(round(float(raw_price) * 100))
                     except (ValueError, TypeError):
-                        return None
-                # Handle float dollar format: 0.55 -> 55 cents
-                if isinstance(price, float) and 0.0 <= price <= 1.0:
-                    return int(round(price * 100))
-                # Handle numeric cent format: 55
-                return int(price)
+                        continue
+                elif isinstance(raw_price, float) and 0.0 <= raw_price <= 1.0:
+                    p = int(round(raw_price * 100))
+                elif raw_price is not None:
+                    try:
+                        p = int(raw_price)
+                    except (ValueError, TypeError):
+                        continue
+                else:
+                    continue
 
-            return None
+                try:
+                    s = int(float(raw_size))
+                except (ValueError, TypeError):
+                    s = 0
 
-        result["best_yes_bid"] = _best_price(yes_bids)
-        result["best_no_bid"] = _best_price(no_bids)
+                if best_p is None or p > best_p:
+                    best_p = p
+                    best_s = s
+
+            return best_p, best_s
+
+        best_yes_bid, best_yes_bid_size = _best_bid(yes_bids)
+        best_no_bid, best_no_bid_size = _best_bid(no_bids)
+
+        result["best_yes_bid"] = best_yes_bid
+        result["best_no_bid"] = best_no_bid
+        result["best_yes_bid_size"] = best_yes_bid_size
+        result["best_no_bid_size"] = best_no_bid_size
 
         # Compute asks using complementary pricing
         result["best_yes_ask"] = (100 - result["best_no_bid"]) if result["best_no_bid"] is not None else None
@@ -663,6 +692,8 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
         state["yes_ask"] = market.get("best_yes_ask") or market.get("yes_ask")
         state["no_bid"] = market.get("best_no_bid") or market.get("no_bid")
         state["no_ask"] = market.get("best_no_ask") or market.get("no_ask")
+        state["yes_bid_size"] = market.get("best_yes_bid_size", 0)
+        state["no_bid_size"] = market.get("best_no_bid_size", 0)
         state["mid_price"] = market.get("mid_price")
         _yb, _ya = state["yes_bid"], state["yes_ask"]
         if _yb is not None and _ya is not None:
