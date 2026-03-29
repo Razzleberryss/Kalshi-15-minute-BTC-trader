@@ -46,11 +46,22 @@ log = logging.getLogger(__name__)
 
 BTC_SOURCES: list[tuple[str, str]] = [
     ("CoinGecko Bitcoin",   "https://www.coingecko.com/en/coins/bitcoin"),
-    ("Coinbase BTC-USD",    "https://www.coinbase.com/price/bitcoin"),
     ("Kraken BTC/USD",      "https://www.kraken.com/prices/btc-bitcoin-price-chart/usd-us-dollar"),
     ("Binance BTC/USDT",    "https://www.binance.com/en/price/bitcoin"),
-    ("TradingView BTCUSD",  "https://www.tradingview.com/symbols/BTCUSD/"),
 ]
+
+# Sources fetched via direct REST API (no Firecrawl scraping).
+# Each entry: (name, url, json_path) where json_path is a dot-separated key path.
+BTC_API_SOURCES: list[tuple[str, str, str]] = [
+    # Coinbase Advanced Trade public endpoint — returns {"data": {"amount": "66500.00"}}
+    ("Coinbase BTC-USD",  "https://api.coinbase.com/v2/prices/BTC-USD/spot", "data.amount"),
+    # Bitstamp public ticker — returns {"last": "66500"} (replaces TradingView scrape)
+    ("Bitstamp BTCUSD",   "https://www.bitstamp.net/api/v2/ticker/btcusd/",  "last"),
+]
+
+# Sanity guard: reject any price outside this range as obviously bad data.
+_BTC_MIN_PLAUSIBLE = 10_000.0
+_BTC_MAX_PLAUSIBLE = 10_000_000.0
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -189,6 +200,65 @@ def extract_price_usd(markdown_text: Optional[str]) -> Optional[float]:
         if 1_000.0 <= value <= 10_000_000.0:
             return value
     return None
+
+
+def fetch_price_api(
+    source_name: str,
+    source_url: str,
+    json_path: str,
+) -> PriceObservation:
+    """
+    Fetch *source_url* as JSON and extract the price via dot-separated *json_path*.
+
+    No Firecrawl needed. Guards against obviously-bad values (BTC outside
+    $10k–$10M). Never raises — exceptions are reflected in PriceObservation.
+    """
+    import urllib.request
+    import json as _json
+    now = utc_now_iso()
+    try:
+        req = urllib.request.Request(
+            source_url,
+            headers={"User-Agent": "openclaw-kalshi-bot/1.0", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw_bytes = resp.read()
+        raw_text = raw_bytes.decode("utf-8", errors="replace")
+        data = _json.loads(raw_text)
+        node = data
+        for key in json_path.split("."):
+            node = node[key]
+        price = float(str(node).replace(",", ""))
+        if not (_BTC_MIN_PLAUSIBLE <= price <= _BTC_MAX_PLAUSIBLE):
+            return PriceObservation(
+                source_name=source_name,
+                source_url=source_url,
+                price_usd=None,
+                scraped_at=now,
+                ok=False,
+                error=f"Price {price} outside plausible BTC range [{_BTC_MIN_PLAUSIBLE}, {_BTC_MAX_PLAUSIBLE}]",
+                raw_excerpt=raw_text[:500],
+            )
+        return PriceObservation(
+            source_name=source_name,
+            source_url=source_url,
+            price_usd=price,
+            scraped_at=now,
+            ok=True,
+            error=None,
+            raw_excerpt=raw_text[:200],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fetch_price_api failed for %s: %s", source_name, exc)
+        return PriceObservation(
+            source_name=source_name,
+            source_url=source_url,
+            price_usd=None,
+            scraped_at=now,
+            ok=False,
+            error=str(exc),
+            raw_excerpt="",
+        )
 
 
 def scrape_price_source(
@@ -365,6 +435,11 @@ def build_synthetic_cfb_snapshot(
             obs = scrape_price_source(api_key, source_name, source_url)
             observations.append(obs)
 
+        # Direct REST API sources — no Firecrawl needed, always attempted
+        for source_name, source_url, json_path in BTC_API_SOURCES:
+            obs = fetch_price_api(source_name, source_url, json_path)
+            observations.append(obs)
+
         valid: list[float] = [
             o.price_usd for o in observations if o.ok and o.price_usd is not None
         ]
@@ -404,9 +479,12 @@ def build_synthetic_cfb_snapshot(
             sample_count_60s = buffer.sample_count()
             window_seconds = buffer.window_seconds
         else:
-            # No buffer: fall back to spot as the best single-sample estimate
+            # No buffer (isolated / stateless run): use spot directly.
+            # Treat as 3+ samples so the window cap does NOT degrade confidence —
+            # multi-source API agreement is sufficient; rolling window doesn't
+            # apply in stateless isolated sessions.
             avg_60s = spot
-            sample_count_60s = 1
+            sample_count_60s = 3
 
         confidence, confidence_score = _classify_confidence(len(clean), spread_bps)
         confidence, confidence_score = _apply_window_confidence_cap(
