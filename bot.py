@@ -84,30 +84,19 @@ class TestComputeTradeContracts(unittest.TestCase):
 
 # ── Time-delay strategy helpers ───────────────────────────────────────────────────────────────
 
-# Cache for parsed datetime to avoid redundant parsing in position management
-# Bounded to prevent memory leak: keep only the most recent entries
-_parsed_datetime_cache: dict = {}
-_DATETIME_CACHE_MAX_SIZE = 100  # Approx. 1 week of 15-min markets
-
-
+@functools.lru_cache(maxsize=100)
 def _parse_close_time(close_time_str: str) -> datetime.datetime:
     """
     Parse ISO datetime string and cache result to avoid redundant parsing.
 
-    Cache is bounded (max 100 entries) using FIFO eviction to prevent memory leak.
-    With ~96 markets per day (15-min intervals), this provides ~1 day of cache coverage.
+    Uses functools.lru_cache (Least Recently Used) for automatic cache eviction.
+    Cache size of 100 provides ~1 day coverage for 15-min markets (~96 per day).
+    LRU eviction keeps the most frequently accessed entries, providing better
+    hit rates than manual FIFO implementation.
     """
-    if close_time_str not in _parsed_datetime_cache:
-        # Evict oldest entry if cache is full (FIFO eviction)
-        if len(_parsed_datetime_cache) >= _DATETIME_CACHE_MAX_SIZE:
-            # Remove the first (oldest) item
-            oldest_key = next(iter(_parsed_datetime_cache))
-            del _parsed_datetime_cache[oldest_key]
-
-        _parsed_datetime_cache[close_time_str] = datetime.datetime.fromisoformat(
-            close_time_str.replace("Z", "+00:00")
-        )
-    return _parsed_datetime_cache[close_time_str]
+    return datetime.datetime.fromisoformat(
+        close_time_str.replace("Z", "+00:00")
+    )
 
 
 def _compute_minutes_to_expiry(market: dict, cached_now: datetime.datetime = None) -> int:
