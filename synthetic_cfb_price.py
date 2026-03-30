@@ -29,11 +29,13 @@ RollingSyntheticCfbBuffer(window_seconds=60)
 
 from __future__ import annotations
 
+import datetime
 import re
 import statistics
-import datetime
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import config
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -75,7 +77,7 @@ class PriceObservation:
     scraped_at: str
     ok: bool
     error: Optional[str]
-    raw_excerpt: str
+    raw_excerpt: Optional[str]
 
 
 @dataclass
@@ -286,8 +288,8 @@ def scrape_price_source(
     try:
         from firecrawl import FirecrawlApp  # type: ignore[import]
         app = FirecrawlApp(api_key=api_key)
-        # firecrawl-py v4+ renamed scrape_url → scrape; fall back for older versions
-        _scrape = getattr(app, "scrape", None) or getattr(app, "scrape_url")
+        # Prefer scrape_url when present (older versions) with fallback to scrape
+        _scrape = getattr(app, "scrape_url", None) or getattr(app, "scrape")
         result = _scrape(source_url, formats=["markdown"])
         markdown: str = ""
         if isinstance(result, dict):
@@ -438,14 +440,36 @@ def build_synthetic_cfb_snapshot(
         return _failed_snapshot(0, "FIRECRAWL_API_KEY not set or empty")
 
     try:
-        for source_name, source_url in BTC_SOURCES:
-            obs = scrape_price_source(api_key, source_name, source_url)
-            observations.append(obs)
+        tasks = {}
+        max_workers = max(1, min(8, len(BTC_SOURCES) + len(BTC_API_SOURCES)))
 
-        # Direct REST API sources — no Firecrawl needed, always attempted
-        for source_name, source_url, json_path in BTC_API_SOURCES:
-            obs = fetch_price_api(source_name, source_url, json_path)
-            observations.append(obs)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for source_name, source_url in BTC_SOURCES:
+                future = executor.submit(scrape_price_source, api_key, source_name, source_url)
+                tasks[future] = (source_name, source_url)
+
+            # Direct REST API sources — no Firecrawl needed, always attempted
+            for source_name, source_url, json_path in BTC_API_SOURCES:
+                future = executor.submit(fetch_price_api, source_name, source_url, json_path)
+                tasks[future] = (source_name, source_url)
+
+            for future in as_completed(tasks):
+                source_name, source_url = tasks[future]
+                try:
+                    observations.append(future.result())
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Synthetic CFB source task failed for %s: %s", source_name, exc)
+                    observations.append(
+                        PriceObservation(
+                            source_name=source_name,
+                            source_url=source_url,
+                            price_usd=None,
+                            scraped_at=now,
+                            ok=False,
+                            error=str(exc),
+                            raw_excerpt="",
+                        )
+                    )
 
         valid: list[float] = [
             o.price_usd for o in observations if o.ok and o.price_usd is not None

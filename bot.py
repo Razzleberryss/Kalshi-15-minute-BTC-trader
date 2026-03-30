@@ -22,6 +22,7 @@ import sys
 import time
 import datetime
 import unittest
+import functools
 from pathlib import Path
 
 import colorlog

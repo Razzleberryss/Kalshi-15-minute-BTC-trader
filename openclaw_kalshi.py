@@ -108,6 +108,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 STOP_FILE = Path.home() / ".openclaw" / "workspace" / "STOP_TRADING"
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -523,32 +524,43 @@ def cmd_markets(client: KalshiClient, args):
 
         best_market = None
         best_distance = 999
-        for cand in candidates:
-            try:
-                raw_ob = client.get_orderbook(cand["ticker"])
-                yes_raw, no_raw = _extract_raw_bids(raw_ob)
-                yes_bids = _parse_bid_array(yes_raw)
-                no_bids  = _parse_bid_array(no_raw)
-                _yes_best = max(yes_bids, key=lambda x: x[0]) if yes_bids else None
-                _no_best  = max(no_bids,  key=lambda x: x[0]) if no_bids  else None
-                byb = _yes_best[0] if _yes_best else None
-                bnb = _no_best[0]  if _no_best  else None
-                bya = (100 - bnb)  if bnb  is not None else None
-                bna = (100 - byb)  if byb  is not None else None
-                if byb is not None and bya is not None:
-                    mid = (byb + bya) / 2
-                    cand["yes_bid"]      = byb
-                    cand["yes_ask"]      = bya
-                    cand["no_bid"]       = bnb
-                    cand["no_ask"]       = bna
-                    cand["mid_price"]    = int(mid)
-                    cand["_ob_enriched"] = True
-                    dist = abs(mid - 50)
-                    if dist < best_distance:
-                        best_distance = dist
-                        best_market = cand
-            except Exception:
-                pass
+
+        def _fetch_orderbook(ticker: str):
+            return client.get_orderbook(ticker)
+
+        max_workers = max(1, min(10, len(candidates)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(_fetch_orderbook, cand["ticker"]): cand for cand in candidates
+            }
+
+            for future in as_completed(future_map):
+                cand = future_map[future]
+                try:
+                    raw_ob = future.result()
+                    yes_raw, no_raw = _extract_raw_bids(raw_ob)
+                    yes_bids = _parse_bid_array(yes_raw)
+                    no_bids = _parse_bid_array(no_raw)
+                    _yes_best = max(yes_bids, key=lambda x: x[0]) if yes_bids else None
+                    _no_best = max(no_bids, key=lambda x: x[0]) if no_bids else None
+                    byb = _yes_best[0] if _yes_best else None
+                    bnb = _no_best[0] if _no_best else None
+                    bya = (100 - bnb) if bnb is not None else None
+                    bna = (100 - byb) if byb is not None else None
+                    if byb is not None and bya is not None:
+                        mid = (byb + bya) / 2
+                        cand["yes_bid"] = byb
+                        cand["yes_ask"] = bya
+                        cand["no_bid"] = bnb
+                        cand["no_ask"] = bna
+                        cand["mid_price"] = int(mid)
+                        cand["_ob_enriched"] = True
+                        dist = abs(mid - 50)
+                        if dist < best_distance:
+                            best_distance = dist
+                            best_market = cand
+                except Exception:
+                    pass
 
         # Step 3: move best (closest-to-50 mid) market to front of rows
         if best_market is not None:
