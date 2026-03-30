@@ -11,16 +11,15 @@ on:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: ${{ github.workspace }}
+
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          path: .
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
