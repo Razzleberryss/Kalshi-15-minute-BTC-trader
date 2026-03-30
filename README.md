@@ -1,10 +1,21 @@
 # Kalshi 15-Minute BTC Trader
 
-A rule-based Python trading bot for Kalshi's BTC Up/Down 15-minute prediction markets. Trades using the official Kalshi REST API v2 with RSA-PSS authentication.
+A rule-based Python trading bot for Kalshi's BTC Up/Down 15-minute prediction markets. Trades using the official Kalshi REST API v2 with RSA-PSS authentication. Now integrates with **OpenClaw Agent Trading** for autonomous, AI-driven signal enrichment and trade execution.
 
 ---
 
 ## New Features
+
+### 🤖 OpenClaw / Agent Trading Integration *(New)*
+The bot now natively integrates with **OpenClaw Agent Trading**, enabling autonomous AI-driven market analysis and trade execution on top of the existing rule-based strategy.
+
+- **AI-Powered Signal Enrichment:** OpenClaw's agent layer cross-references Kalshi orderbook data with external momentum signals, sentiment feeds, and multi-timeframe BTC price context to score trade confidence more accurately.
+- **Autonomous Agent Mode:** When `OPENCLAW_AGENT_MODE=true`, the OpenClaw agent can independently decide whether to act on a signal based on configurable risk thresholds — no manual approval needed.
+- **Orderbook Intelligence:** Pulls enriched market depth data from OpenClaw's data layer to supplement Kalshi's native orderbook, providing tighter spread analysis and better entry timing.
+- **Seamless Pipeline Integration:** Plugs directly into `strategy.py` — the existing momentum + orderbook skew logic feeds into OpenClaw's scoring model, and the agent returns an enriched composite signal back to `bot.py`.
+- **Configurable Agent Autonomy:** Set `OPENCLAW_CONFIDENCE_THRESHOLD` to control at what confidence level the agent auto-executes vs. defers to the rule-based fallback.
+
+---
 
 ### Early Exit Logic
 The bot actively manages open positions before expiry to lock in gains and cut losses:
@@ -14,13 +25,6 @@ The bot actively manages open positions before expiry to lock in gains and cut l
 - **Signal Reversal:** Sells an open position if the latest strategy signal flips against your current holding (e.g., holding YES but signal becomes NO).
 - **Daily Risk Limits:** Blocks new entries after hitting `MAX_DAILY_LOSS_CENTS` or `MAX_DAILY_TRADES`, while continuing to manage/exit open positions.
 - **Strict Market Scope:** Discovery and order placement are restricted to `BTC_SERIES_TICKER` markets only.
-
-### OpenClaw Integration
-The bot now integrates with **OpenClaw**, enabling advanced market data ingestion, smarter signal enrichment, and deeper orderbook analysis for more precise BTC Up/Down entries.
-
-- Pulls enriched market context from OpenClaw's data layer to supplement Kalshi orderbook signals.
-- Improves signal confidence scoring by cross-referencing momentum data from multiple sources.
-- Seamlessly plugs into the existing `strategy.py` pipeline with minimal config changes.
 
 ### Cursor Plugin Support
 This project is fully optimized for development inside **Cursor** with AI-assisted coding enabled:
@@ -45,6 +49,7 @@ This project is fully optimized for development inside **Cursor** with AI-assist
 ├── bot.py              # Main loop - manages positions and enters trades
 ├── kalshi_client.py    # Kalshi API wrapper (auth, orders, positions, selling)
 ├── strategy.py         # Signal generation (momentum + orderbook skew + OpenClaw)
+├── openclaw_client.py  # OpenClaw agent interface (signal enrichment + agent mode)
 ├── risk_manager.py     # Risk checks, position sizing, CSV trade log
 ├── config.py           # Config loader (reads from .env)
 ├── .env.example        # Copy to .env and fill in your keys
@@ -95,6 +100,97 @@ When running with `DRY_RUN=false` and `KALSHI_ENV=prod`, the bot logs a prominen
 
 ---
 
+## OpenClaw / Agent Trading Setup
+
+### Step 1: Get your OpenClaw API key
+
+1. Sign up or log in at [openclaw.io](https://openclaw.io) (or your OpenClaw instance URL).
+2. Navigate to **Settings → API Keys** and generate a new key.
+3. Copy the key — you'll add it to `.env` in the next step.
+
+### Step 2: Add OpenClaw credentials to `.env`
+
+Open your `.env` file and add the following variables:
+
+```env
+# OpenClaw / Agent Trading
+OPENCLAW_API_KEY=your_openclaw_api_key_here
+OPENCLAW_BASE_URL=https://api.openclaw.io/v1   # Update if self-hosting
+OPENCLAW_AGENT_MODE=false                       # Set true to enable autonomous agent execution
+OPENCLAW_CONFIDENCE_THRESHOLD=0.72              # Agent auto-executes only above this confidence (0.0–1.0)
+```
+
+> **Note:** Keep `OPENCLAW_AGENT_MODE=false` while testing. In agent mode, OpenClaw can place trades autonomously — only enable it once you've validated signal quality in dry-run.
+
+### Step 3: Install the OpenClaw client dependency
+
+The OpenClaw client is included via `requirements.txt`. If you need to install it manually:
+
+```bash
+pip install openclaw-sdk
+```
+
+Or if OpenClaw is accessed via direct HTTP (no SDK):
+
+```bash
+pip install httpx  # already included in requirements.txt
+```
+
+### Step 4: Verify the connection
+
+Run the connection test to confirm your API key and endpoint are working:
+
+```bash
+python -c "from openclaw_client import OpenClawClient; c = OpenClawClient(); print(c.ping())"
+```
+
+Expected output:
+
+```
+✅ OpenClaw connected — agent ready.
+```
+
+If you see an authentication error, double-check `OPENCLAW_API_KEY` and `OPENCLAW_BASE_URL` in `.env`.
+
+### Step 5: Run the bot with OpenClaw enabled
+
+```bash
+# Dry run with OpenClaw signal enrichment active
+python bot.py
+
+# Live trading with OpenClaw enrichment (agent mode off)
+DRY_RUN=false python bot.py
+
+# Live trading with full autonomous agent mode
+DRY_RUN=false OPENCLAW_AGENT_MODE=true python bot.py
+```
+
+### How the OpenClaw integration works
+
+```
+Kalshi Orderbook
+      │
+      ▼
+ strategy.py  ──► momentum score + orderbook skew
+      │
+      ▼
+openclaw_client.py  ──► enriches signal with AI context, cross-refs external BTC data
+      │
+      ├─ AGENT_MODE=false: returns enriched composite_signal → bot.py decides
+      └─ AGENT_MODE=true:  agent evaluates confidence → auto-executes if above threshold
+```
+
+### OpenClaw `.env` reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENCLAW_API_KEY` | *(required)* | Your OpenClaw API key |
+| `OPENCLAW_BASE_URL` | `https://api.openclaw.io/v1` | API base URL (update if self-hosted) |
+| `OPENCLAW_AGENT_MODE` | `false` | Enable autonomous agent trade execution |
+| `OPENCLAW_CONFIDENCE_THRESHOLD` | `0.72` | Min confidence score for agent auto-execution |
+
+---
+
 ## Local Web Dashboard
 
 A simple browser dashboard lets you monitor the bot in real time without reading log files.
@@ -126,6 +222,7 @@ Open **http://127.0.0.1:8000** in your browser. The page auto-refreshes every 5 
 | Mid price | Midpoint of the YES spread |
 | Spread | YES ask − YES bid (in cents) |
 | Signal composite / momentum / skew / confidence | Strategy signal components |
+| OpenClaw enriched confidence | AI-enriched confidence score from OpenClaw agent |
 | Position size | Contracts currently held |
 | Realized PnL today | Today's closed-trade P&L in cents |
 
