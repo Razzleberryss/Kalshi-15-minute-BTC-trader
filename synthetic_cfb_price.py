@@ -296,7 +296,14 @@ def scrape_price_source(
             markdown = result.markdown or ""
         elif hasattr(result, "content"):
             markdown = result.content or ""
-        raw_excerpt = str(markdown)[:1000]
+
+        # Memory optimization: Only store excerpts in debug mode
+        # In production, excerpts consume 1KB+ per observation with minimal value
+        if config.LOG_LEVEL == "DEBUG":
+            raw_excerpt = str(markdown)[:200]  # Reduced from 1000 to 200 chars
+        else:
+            raw_excerpt = None
+
         price = extract_price_usd(markdown)
         if price is None:
             return PriceObservation(

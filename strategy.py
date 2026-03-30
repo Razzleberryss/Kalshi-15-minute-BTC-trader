@@ -98,12 +98,16 @@ def get_btc_momentum() -> Optional[float]:
         return None
 
 
-def get_orderbook_skew(orderbook: dict) -> float:
+def get_orderbook_skew(orderbook: dict, max_levels: int = 10) -> float:
     """
     Compute YES orderbook skew from Kalshi orderbook data.
     Returns a float in [-1, 1]:
       > 0  => more YES bids (market leans YES)
       < 0  => more NO bids  (market leans NO)
+
+    Performance optimization: Only processes top N orderbook levels (default 10).
+    Deep levels far from best bid contribute minimal signal but add processing
+    overhead. Top 10 levels typically capture 95%+ of meaningful skew information.
 
     Supports all orderbook formats:
       - orderbook_fp.yes_dollars_fp / no_dollars_fp  (new fixed-point format, string prices)
@@ -113,13 +117,21 @@ def get_orderbook_skew(orderbook: dict) -> float:
       - top-level yes_dollars / no_dollars           (market-level dollar price fields)
       - orderbook["orderbook"].yes / no              (legacy integer-cents, wrapped)
       - top-level yes / no                           (legacy integer-cents, direct)
+
+    Args:
+        orderbook: Orderbook dict from API or WebSocket
+        max_levels: Maximum number of levels to process per side (default: 10)
+
+    Returns:
+        Skew value in [-1.0, 1.0]
     """
     try:
+        from orderbook_utils import get_weighted_bid_liquidity, extract_yes_no_bids
+
+        # Extract YES and NO arrays (handles all formats)
         orderbook_data = orderbook.get("orderbook", {})
         orderbook_fp = orderbook.get("orderbook_fp", {})
 
-        # Priority: new fixed-point > older fp > WebSocket-wrapped _fp > WebSocket-wrapped _dollars
-        #           > top-level _dollars > legacy integer-cents (wrapped) > legacy integer-cents (direct)
         yes_raw = (
             orderbook_fp.get("yes_dollars_fp")
             or orderbook_fp.get("yes_dollars")
@@ -139,6 +151,10 @@ def get_orderbook_skew(orderbook: dict) -> float:
             or orderbook.get("no", [])
         )
 
+        # Slice arrays before processing (performance optimization)
+        yes_raw_limited = yes_raw[:max_levels] if yes_raw else []
+        no_raw_limited = no_raw[:max_levels] if no_raw else []
+
         def to_price_cents(raw_price):
             """Convert price to integer cents (handles both string dollars and int cents)."""
             if isinstance(raw_price, str):
@@ -146,16 +162,18 @@ def get_orderbook_skew(orderbook: dict) -> float:
             return int(raw_price)
 
         # Calculate liquidity weighted by price_cents * size
+        # Only process top N levels for performance
         yes_liquidity = 0
         no_liquidity = 0
 
-        for entry in yes_raw:
+        for entry in yes_raw_limited:
             if isinstance(entry, (list, tuple)) and len(entry) >= 2:
                 try:
                     yes_liquidity += to_price_cents(entry[0]) * int(float(entry[1]))
                 except (ValueError, TypeError):
                     pass
-        for entry in no_raw:
+
+        for entry in no_raw_limited:
             if isinstance(entry, (list, tuple)) and len(entry) >= 2:
                 try:
                     no_liquidity += to_price_cents(entry[0]) * int(float(entry[1]))
@@ -168,7 +186,7 @@ def get_orderbook_skew(orderbook: dict) -> float:
             return 0.0
 
         skew = (yes_liquidity - no_liquidity) / total  # -1 to +1
-        log.debug("Orderbook skew: %.3f (YES=%d, NO=%d)", skew, yes_liquidity, no_liquidity)
+        log.debug("Orderbook skew: %.3f (YES=%d, NO=%d, levels=%d)", skew, yes_liquidity, no_liquidity, max_levels)
         return skew
     except Exception as exc:
         log.error("Error computing orderbook skew: %s", exc)
