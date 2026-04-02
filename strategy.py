@@ -29,8 +29,8 @@ import config
 log = logging.getLogger(__name__)
 
 # Cache for BTC momentum data to avoid redundant yfinance API calls
-# TTL set to 5 minutes (300s) since 1-minute bars don't change that frequently
-# and reduces API calls in a 15-minute market window
+# TTL set to 1 minute (60s) since 1-minute bars update frequently;
+# balances freshness against API call overhead in a 15-minute market window
 _btc_momentum_cache: dict = {"data": None, "timestamp": 0, "ttl": 60}
 
 # A market whose YES ask ≈ 1.00 and YES bid ≈ 0.00 (spread ≥ this) is considered

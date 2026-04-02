@@ -66,6 +66,12 @@ BTC_API_SOURCES: list[tuple[str, str, str]] = [
 _BTC_MIN_PLAUSIBLE = 10_000.0
 _BTC_MAX_PLAUSIBLE = 10_000_000.0
 
+
+def _is_valid_btc_price(price: float) -> bool:
+    """Return True if *price* falls within the plausible BTC/USD range."""
+    return _BTC_MIN_PLAUSIBLE <= price <= _BTC_MAX_PLAUSIBLE
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -232,7 +238,7 @@ def fetch_price_api(
         for key in json_path.split("."):
             node = node[key]
         price = float(str(node).replace(",", ""))
-        if not (_BTC_MIN_PLAUSIBLE <= price <= _BTC_MAX_PLAUSIBLE):
+        if not _is_valid_btc_price(price):
             return PriceObservation(
                 source_name=source_name,
                 source_url=source_url,

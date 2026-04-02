@@ -312,7 +312,8 @@ class KalshiWebSocketClient:
             if size_int > 0:
                 normalized.append([price_cents, size_int])
 
-        normalized.sort(key=lambda item: item[0], reverse=True)
+        if len(normalized) > 1:
+            normalized.sort(key=lambda item: item[0], reverse=True)
         return normalized
 
     @classmethod

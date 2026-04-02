@@ -362,13 +362,16 @@ class KalshiClient:
             )
 
         # De-duplicate by order_id in case APIs overlap at boundary conditions.
+        # Cache update times to avoid re-parsing timestamps on every comparison.
         deduped_by_id: dict[str, dict] = {}
+        deduped_update_times: dict[str, datetime.datetime] = {}
         for order in orders:
             order_id = order.get("order_id")
             if order_id:
-                current = deduped_by_id.get(order_id)
-                if current is None or self._order_update_time(order) >= self._order_update_time(current):
+                order_time = self._order_update_time(order)
+                if order_id not in deduped_update_times or order_time >= deduped_update_times[order_id]:
                     deduped_by_id[order_id] = order
+                    deduped_update_times[order_id] = order_time
                 continue
             deduped_by_id[f"_anon_{len(deduped_by_id)}"] = order
 

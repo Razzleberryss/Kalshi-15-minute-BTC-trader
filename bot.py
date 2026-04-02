@@ -67,13 +67,14 @@ def _compute_trade_contracts(sig_size, budget_contracts):
 
 # ── Time-delay strategy helpers ───────────────────────────────────────────────────────────────
 
-@functools.lru_cache(maxsize=100)
+@functools.lru_cache(maxsize=200)
 def _parse_close_time(close_time_str: str) -> datetime.datetime:
     """
     Parse ISO datetime string and cache result to avoid redundant parsing.
 
     Uses functools.lru_cache (Least Recently Used) for automatic cache eviction.
-    Cache size of 100 provides ~1 day coverage for 15-min markets (~96 per day).
+    Cache size of 200 provides ~2 day coverage for 15-min markets (~96 per day),
+    preventing LRU thrashing during multi-day runs with many distinct market windows.
     LRU eviction keeps the most frequently accessed entries, providing better
     hit rates than manual FIFO implementation.
     """

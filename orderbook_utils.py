@@ -54,8 +54,10 @@ def parse_bid_array(bid_array, max_levels: Optional[int] = None) -> List[Tuple[i
                 # Skip malformed entries
                 continue
 
-    # Sort by price descending (highest price = best bid)
-    return sorted(parsed, key=lambda x: x[0], reverse=True)
+    # Sort by price descending (highest price = best bid); skip for 0–1 entries
+    if len(parsed) > 1:
+        parsed.sort(key=lambda x: x[0], reverse=True)
+    return parsed
 
 
 def get_best_bid(bid_array) -> Optional[Tuple[int, int]]:
