@@ -315,6 +315,7 @@ class KalshiWebSocketClient:
         if len(normalized) > 1:
             normalized.sort(key=lambda item: item[0], reverse=True)
         return normalized
+
     @classmethod
     def _normalize_orderbook(cls, orderbook) -> dict:
         """Normalize orderbook payloads into a consistent yes/no list format."""
