@@ -173,11 +173,14 @@ def execute_with_decision_engine(
                 log.exception("envelope_fn() failed during execute_with_decision_engine")
                 envelope = {
                     "ok": False,
-                    "status": "error",
                     "code": "ENVELOPE_FN_EXCEPTION",
-                    "error": {
-                        "type": type(exc).__name__,
-                        "message": str(exc),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "details": {
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "retryable": False,
+                        "escalate": True,
+                        "halt_trading": False,
                     },
                 }
         else:
