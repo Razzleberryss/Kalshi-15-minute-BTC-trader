@@ -14,6 +14,7 @@ Handles:
 import base64
 import datetime
 import logging
+import random
 import time
 import uuid
 from dataclasses import dataclass
@@ -169,8 +170,12 @@ class KalshiClient:
                 )
 
             if attempt < max_attempts - 1:
-                backoff = 2 ** attempt
-                log.info("Retrying in %ds...", backoff)
+                # Full jitter backoff: sleep between 0 and 2^attempt seconds.
+                # Avoids thundering-herd when multiple retries fire at once and
+                # keeps the worst-case retry wait well under the previous fixed
+                # 1 + 2 + 4 = 7 s schedule.
+                backoff = random.uniform(0, 2 ** attempt)
+                log.info("Retrying in %.2fs...", backoff)
                 time.sleep(backoff)
 
         log.error(

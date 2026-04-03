@@ -159,16 +159,20 @@ if _order_size_fp_str:
 # =============================================================================
 # API Client
 # =============================================================================
-# Per-request timeout in seconds
-REQUEST_TIMEOUT_SECONDS: int = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
-# Maximum number of retry attempts for transient API errors (0 = no retries)
-REQUEST_MAX_RETRIES: int = int(os.getenv("REQUEST_MAX_RETRIES", "3"))
+# Per-request timeout in seconds (lowered from 10 to 5: Kalshi API typically
+# responds in <1 s, so abandoning slow requests sooner keeps the cycle fast)
+REQUEST_TIMEOUT_SECONDS: int = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "5"))
+# Maximum number of retry attempts for transient API errors (0 = no retries).
+# Reduced from 3 to 2 to cap worst-case backoff at 1+2 = 3 s instead of 7 s.
+REQUEST_MAX_RETRIES: int = int(os.getenv("REQUEST_MAX_RETRIES", "2"))
 
 # =============================================================================
 # Bot Loop
 # =============================================================================
 DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() == "true"
-POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
+# Reduced from 30 s to 10 s: shorter poll interval means 3× faster decision
+# cycles without any other code changes. Tune via POLL_INTERVAL_SECONDS in .env.
+POLL_INTERVAL_SECONDS: int = int(os.getenv("POLL_INTERVAL_SECONDS", "10"))
 LOOP_INTERVAL_SECONDS: int = POLL_INTERVAL_SECONDS  # alias used in bot.py
 
 # How many seconds before contract close_time to trigger the expiry exit
@@ -184,7 +188,10 @@ FIRECRAWL_API_KEY: str = os.getenv("FIRECRAWL_API_KEY", "")
 # Minimum seconds between full Firecrawl+API synthetic CFB fetches. Between
 # full runs, only public JSON API sources are used (faster, no Firecrawl).
 # Set to 0 to always run the full scrape path when a Firecrawl key is set.
-CFB_MIN_INTERVAL_SECONDS: float = float(os.getenv("CFB_MIN_INTERVAL_SECONDS", "25"))
+# Raised from 25 s to 60 s: the full Firecrawl scrape (6-11 concurrent
+# network calls) can block the bot for several seconds; doing it at most once
+# per minute keeps cycle latency low while still refreshing CFB context.
+CFB_MIN_INTERVAL_SECONDS: float = float(os.getenv("CFB_MIN_INTERVAL_SECONDS", "60"))
 
 # When True, bot buy/sell uses kalshi_inprocess_orders (same envelopes as CLI)
 # instead of spawning openclaw_kalshi.py per order.

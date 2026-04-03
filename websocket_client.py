@@ -56,6 +56,9 @@ class KalshiWebSocketClient:
         self._orderbooks = {}
         self._lock = threading.Lock()
 
+        # Signalled by _on_open so start() can wait without a busy-poll loop
+        self._connected_event = threading.Event()
+
         # Track subscribed markets
         self._subscribed_markets = set()
         self._message_id = 1
@@ -91,14 +94,13 @@ class KalshiWebSocketClient:
         self.ws_thread = threading.Thread(target=self._run_websocket, daemon=True)
         self.ws_thread.start()
 
-        # Wait briefly for connection to establish
-        for _ in range(50):  # 5 seconds max
-            if self._connected:
-                log.info("WebSocket client connected successfully")
-                return
-            time.sleep(0.1)
-
-        log.warning("WebSocket connection not established within timeout")
+        # Block until the WebSocket handshake completes or the timeout expires.
+        # threading.Event.wait() releases the GIL while sleeping, so this is
+        # far cheaper than the previous busy-poll (50 × time.sleep(0.1)).
+        if self._connected_event.wait(timeout=5.0):
+            log.info("WebSocket client connected successfully")
+        else:
+            log.warning("WebSocket connection not established within timeout")
 
     def stop(self):
         """Stop the WebSocket connection and clean up."""
@@ -146,6 +148,7 @@ class KalshiWebSocketClient:
         """Called when WebSocket connection is opened."""
         log.info("WebSocket connection opened")
         self._connected = True
+        self._connected_event.set()
 
     def _on_message(self, ws, message):
         """Called when a message is received from the WebSocket."""
@@ -176,8 +179,10 @@ class KalshiWebSocketClient:
             # For snapshot messages, replace the entire orderbook
             if data.get("type") == "orderbook_snapshot":
                 orderbook_data = payload
+                # Normalize outside the lock so heavy parsing doesn't block readers
+                normalized = self._normalize_orderbook(orderbook_data)
                 with self._lock:
-                    self._orderbooks[ticker] = self._normalize_orderbook(orderbook_data)
+                    self._orderbooks[ticker] = normalized
                 log.debug("Received orderbook snapshot for %s", ticker)
 
             # For delta messages, apply the incremental update
@@ -206,6 +211,7 @@ class KalshiWebSocketClient:
         """Called when WebSocket connection is closed."""
         log.info("WebSocket connection closed (code=%s, msg=%s)", close_status_code, close_msg)
         self._connected = False
+        self._connected_event.clear()
 
     def subscribe_to_market(self, ticker: str):
         """
