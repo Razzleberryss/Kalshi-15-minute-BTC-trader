@@ -463,7 +463,7 @@ class TestCliBuyArgs(unittest.TestCase):
 
     @patch("cli_executor.execute_with_decision_engine")
     @patch("config.INPROCESS_KALSHI_ORDERS", False)
-    def test_builds_buy_args(self, _inprocess, mock_exec):
+    def test_builds_buy_args(self, mock_exec):
         ok_outcome = DecisionOutcome(
             ok=True, code="BUY_PLACED", action=AgentAction.CONTINUE,
             retry_allowed=False, halt_trading=False,
@@ -479,7 +479,7 @@ class TestCliBuyArgs(unittest.TestCase):
 
     @patch("cli_executor.execute_with_decision_engine")
     @patch("config.INPROCESS_KALSHI_ORDERS", False)
-    def test_builds_buy_args_with_dry_run(self, _inprocess, mock_exec):
+    def test_builds_buy_args_with_dry_run(self, mock_exec):
         ok_outcome = DecisionOutcome(
             ok=True, code="BUY_DRY_RUN", action=AgentAction.CONTINUE,
             retry_allowed=False, halt_trading=False,
@@ -499,7 +499,7 @@ class TestCliSellArgs(unittest.TestCase):
 
     @patch("cli_executor.execute_with_decision_engine")
     @patch("config.INPROCESS_KALSHI_ORDERS", False)
-    def test_builds_sell_args(self, _inprocess, mock_exec):
+    def test_builds_sell_args(self, mock_exec):
         ok_outcome = DecisionOutcome(
             ok=True, code="SELL_PLACED", action=AgentAction.CONTINUE,
             retry_allowed=False, halt_trading=False,
@@ -515,7 +515,7 @@ class TestCliSellArgs(unittest.TestCase):
 
     @patch("cli_executor.execute_with_decision_engine")
     @patch("config.INPROCESS_KALSHI_ORDERS", False)
-    def test_builds_sell_args_with_dry_run(self, _inprocess, mock_exec):
+    def test_builds_sell_args_with_dry_run(self, mock_exec):
         ok_outcome = DecisionOutcome(
             ok=True, code="SELL_DRY_RUN", action=AgentAction.CONTINUE,
             retry_allowed=False, halt_trading=False,
