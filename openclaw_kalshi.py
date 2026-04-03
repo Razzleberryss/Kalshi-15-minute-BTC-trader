@@ -127,6 +127,7 @@ log = logging.getLogger("openclaw_kalshi")
 
 from kalshi_agent_envelope import (  # noqa: E402
     DECISION_POLICY,
+    DECISION_POLICY,
     failure_envelope as _failure,
     success_envelope as _success,
 )
