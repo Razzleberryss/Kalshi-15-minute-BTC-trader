@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime
 import re
 import statistics
+import threading
 import time
 import logging
 from collections import deque
@@ -42,6 +43,9 @@ from typing import Optional
 import config
 
 log = logging.getLogger(__name__)
+
+_firecrawl_lock = threading.Lock()
+_firecrawl_app_cache: dict[str, object] = {}
 
 # ---------------------------------------------------------------------------
 # Source list
@@ -60,6 +64,8 @@ BTC_API_SOURCES: list[tuple[str, str, str]] = [
     ("Coinbase BTC-USD",  "https://api.coinbase.com/v2/prices/BTC-USD/spot", "data.amount"),
     # Bitstamp public ticker — returns {"last": "66500"} (replaces TradingView scrape)
     ("Bitstamp BTCUSD",   "https://www.bitstamp.net/api/v2/ticker/btcusd/",  "last"),
+    # Binance public — returns {"symbol":"BTCUSDT","price":"..."} (enables API-only path with 3+ sources)
+    ("Binance BTCUSDT",   "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", "price"),
 ]
 
 # Sanity guard: reject any price outside this range as obviously bad data.
@@ -294,7 +300,13 @@ def scrape_price_source(
         )
     try:
         from firecrawl import FirecrawlApp  # type: ignore[import]
-        app = FirecrawlApp(api_key=api_key)
+
+        key = (api_key or "").strip()
+        with _firecrawl_lock:
+            app = _firecrawl_app_cache.get(key)
+            if app is None:
+                app = FirecrawlApp(api_key=key)
+                _firecrawl_app_cache[key] = app
         # Prefer scrape_url when present (older versions) with fallback to scrape
         _scrape = getattr(app, "scrape_url", None) or getattr(app, "scrape")
         result = _scrape(source_url, formats=["markdown"])
@@ -396,6 +408,8 @@ def build_synthetic_cfb_snapshot(
     api_key: str,
     buffer: Optional[RollingSyntheticCfbBuffer] = None,
     outlier_threshold_bps: float = 40.0,
+    *,
+    skip_firecrawl: bool = False,
 ) -> SyntheticCfbSnapshot:
     """
     Scrape all configured sources, filter outliers, update the rolling buffer,
@@ -414,6 +428,9 @@ def build_synthetic_cfb_snapshot(
     8. Compute spread stats and classify confidence, capping for immature windows.
 
     Never raises – all exceptions are caught internally.
+
+    When *skip_firecrawl* is True, only ``BTC_API_SOURCES`` are queried (no Firecrawl).
+    ``api_key`` may be empty in that mode.
     """
     now = utc_now_iso()
     observations: list[PriceObservation] = []
@@ -443,17 +460,19 @@ def build_synthetic_cfb_snapshot(
             error=error,
         )
 
-    if not (api_key or "").strip():
+    if not skip_firecrawl and not (api_key or "").strip():
         return _failed_snapshot(0, "FIRECRAWL_API_KEY not set or empty")
 
     try:
         tasks = {}
-        max_workers = max(1, min(8, len(BTC_SOURCES) + len(BTC_API_SOURCES)))
+        n_tasks = len(BTC_API_SOURCES) if skip_firecrawl else len(BTC_SOURCES) + len(BTC_API_SOURCES)
+        max_workers = max(1, min(8, n_tasks))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for source_name, source_url in BTC_SOURCES:
-                future = executor.submit(scrape_price_source, api_key, source_name, source_url)
-                tasks[future] = (source_name, source_url)
+            if not skip_firecrawl:
+                for source_name, source_url in BTC_SOURCES:
+                    future = executor.submit(scrape_price_source, api_key, source_name, source_url)
+                    tasks[future] = (source_name, source_url)
 
             for source_name, source_url, json_path in BTC_API_SOURCES:
                 future = executor.submit(fetch_price_api, source_name, source_url, json_path)

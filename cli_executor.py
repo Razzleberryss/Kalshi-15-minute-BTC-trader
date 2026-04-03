@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Any, Optional, Callable
 
 from agent_decision_engine import (
     AgentAction,
@@ -149,10 +149,14 @@ def execute_with_decision_engine(
     retry_policy: Optional[RetryPolicy] = None,
     timeout: int = 30,
     on_escalation: Optional[Callable[[DecisionOutcome], None]] = None,
+    envelope_fn: Optional[Callable[[], Any]] = None,
 ) -> tuple:
     """Execute a CLI command with full decision-engine-driven retry/escalate loop.
 
     Returns ``(DecisionOutcome, envelope_dict)``.
+
+    If *envelope_fn* is set, it is called instead of ``execute_cli`` to obtain
+    the JSON envelope (in-process orders). *args* is ignored in that case.
 
     Retry state is local to this invocation — the attempt counter starts at 0
     and is never shared with other calls.  On CONTINUE the counter is implicitly
@@ -162,7 +166,25 @@ def execute_with_decision_engine(
     attempt = 0
 
     while True:
-        envelope = execute_cli(args, timeout=timeout)
+        if envelope_fn is not None:
+            try:
+                envelope = envelope_fn()
+            except Exception as exc:
+                log.exception("envelope_fn() failed during execute_with_decision_engine")
+                envelope = {
+                    "ok": False,
+                    "code": "ENVELOPE_FN_EXCEPTION",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "details": {
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "retryable": False,
+                        "escalate": True,
+                        "halt_trading": False,
+                    },
+                }
+        else:
+            envelope = execute_cli(args, timeout=timeout)
         outcome = interpret_cli_response(
             envelope, retry_attempt=attempt, retry_policy=policy,
         )

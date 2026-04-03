@@ -125,69 +125,12 @@ from kalshi_client import KalshiClient  # noqa: E402
 
 log = logging.getLogger("openclaw_kalshi")
 
-
-# ── Decision policy: response-code → (retryable, halt_trading, requires_human_review) ─
-#
-# Single source of truth for agent orchestration decisions.
-# Grouped by category; each tuple is (retryable, halt_trading, requires_human_review).
-#
-# Merge precedence: centralized policy OVERWRITES any same-named decision fields
-# already present in result/details — no mixed ownership.
-#
-# Unmapped/unknown codes fall back to the safest posture:
-#   retryable=False, halt_trading=True, requires_human_review=True
-#
-# Categories:
-#   success trading outcomes       — normal trade lifecycle
-#   success informational/status   — read-only queries
-#   success advisory / commander intel — ok but operationally notable
-#   retryable transient failures   — network / data-fetch; retry is safe
-#   hard-stop failures             — halt the agent until resolved
-#   caller / planning / validation — agent sent a bad command; don't halt
-#                                    system-wide trading, but flag for review
-
-_DECISION_FIELDS = ("retryable", "halt_trading", "requires_human_review")
-_SAFE_FALLBACK = (False, True, True)
-
-DECISION_POLICY: dict[str, tuple[bool, bool, bool]] = {
-    # ── success: trading outcomes ──
-    "BUY_DRY_RUN":  (False, False, False),
-    "BUY_PLACED":   (False, False, False),
-    "SELL_DRY_RUN": (False, False, False),
-    "SELL_PLACED":  (False, False, False),
-    # ── success: informational / status ──
-    "STATUS_OK":    (False, False, False),
-    "MARKETS_OK":   (False, False, False),
-    "ORDERBOOK_OK": (False, False, False),
-    # ── success: advisory / commander intel ──
-    "ORDERBOOK_EMPTY": (True,  False, False),   # transient market state; agent may retry later
-    "SELL_CLAMPED":    (False, False, True),
-    # ── failure: retryable transient ──
-    "ORDERBOOK_FETCH_ERROR":           (True,  False, False),
-    "SERIES_RESOLUTION_NETWORK_ERROR": (True,  False, False),
-    # ── failure: hard stops ──
-    "STOP_TRADING":         (False, True,  True),
-    "LIVE_TRADING_BLOCKED": (False, True,  True),
-    "CONFIG_ERROR":         (False, True,  True),
-    "COMMAND_FAILED":       (False, True,  True),
-    # ── failure: caller / planning / validation ──
-    "INVALID_SIDE":              (False, False, True),
-    "INVALID_COUNT":             (False, False, True),
-    "INVALID_PRICE_RANGE":       (False, False, True),
-    "INVALID_TICKER":            (False, False, True),
-    "PRICE_OUTSIDE_CONFIG_RANGE": (False, False, True),
-    "EXCEEDS_MAX_TRADE_DOLLARS":  (False, False, True),
-    "NO_POSITION":               (False, False, True),
-    # NOTE: SERIES_RESOLUTION_FAILED currently covers both deterministic config/planning
-    # errors (bad series) and intermittent upstream data gaps (no live market yet).
-    # If the latter becomes common, consider splitting into a separate retryable code.
-    "SERIES_RESOLUTION_FAILED":  (False, False, True),
-}
-
-
-def _decision_flags(code: str) -> dict[str, bool]:
-    """Return the three decision booleans for *code*, using safe fallback for unmapped codes."""
-    return dict(zip(_DECISION_FIELDS, DECISION_POLICY.get(code, _SAFE_FALLBACK)))
+from kalshi_agent_envelope import (  # noqa: E402
+    DECISION_POLICY,
+    DECISION_POLICY,
+    failure_envelope as _failure,
+    success_envelope as _success,
+)
 
 
 def _check_stop_file():
@@ -209,40 +152,6 @@ def _check_live_gate(args):
             "or pass --dry-run.",
         )
     return False
-
-
-def _success(code: str, result: dict, warnings: list = None) -> dict:
-    """Build a successful response envelope.
-
-    Shape is fixed: {ok, code, result, warnings}.
-    ``warnings`` is always a list (empty when there are none).
-    Decision flags (retryable, halt_trading, requires_human_review) are merged
-    into ``result`` from the centralized DECISION_POLICY; policy always wins.
-    """
-    merged = {**result, **_decision_flags(code)}
-    return {
-        "ok": True,
-        "code": code,
-        "result": merged,
-        "warnings": warnings if warnings else [],
-    }
-
-
-def _failure(code: str, error: str, details: dict = None) -> dict:
-    """Build a failed response envelope.
-
-    Shape is fixed: {ok, code, error, details}.
-    ``details`` is always a dict (empty when there are none).
-    Decision flags (retryable, halt_trading, requires_human_review) are merged
-    into ``details`` from the centralized DECISION_POLICY; policy always wins.
-    """
-    merged = {**(details if details is not None else {}), **_decision_flags(code)}
-    return {
-        "ok": False,
-        "code": code,
-        "error": error,
-        "details": merged,
-    }
 
 
 def _die(code: str, error: str, *, details: dict = None, exit_code: int = 1):

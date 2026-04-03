@@ -29,6 +29,17 @@ import config
 
 log = logging.getLogger(__name__)
 
+_LOG_BODY_MAX_LEN = 500
+
+
+def _truncate_for_log(text: Optional[str], max_len: int = _LOG_BODY_MAX_LEN) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + f"... [truncated, {len(text)} chars]"
+
 
 @dataclass
 class HistoricalCutoffs:
@@ -130,12 +141,13 @@ class KalshiClient:
                         error_msg = error_data.get("error", {}).get("message", resp.text)
                         log.error(
                             "Kalshi API error %s %s -> HTTP %s: code=%s message=%s",
-                            method, path, resp.status_code, error_code, error_msg
+                            method, path, resp.status_code, error_code,
+                            _truncate_for_log(str(error_msg)),
                         )
                     except Exception:
                         log.error(
                             "Kalshi API error %s %s -> HTTP %s: %s",
-                            method, path, resp.status_code, resp.text
+                            method, path, resp.status_code, _truncate_for_log(resp.text),
                         )
                     resp.raise_for_status()
                 return resp.json()

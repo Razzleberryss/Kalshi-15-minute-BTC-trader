@@ -17,11 +17,13 @@ Loop logic (every LOOP_INTERVAL_SECONDS):
 """
 import json
 import logging
+import os
 import signal
 import sys
 import time
 import datetime
 import functools
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import colorlog
@@ -38,6 +40,10 @@ from synthetic_cfb_price import (
     RollingSyntheticCfbBuffer,
 )
 
+_dashboard_last_write_mono: float = 0.0
+_dashboard_last_payload: str | None = None
+_cfb_last_full_monotonic: float | None = None
+
 
 def write_dashboard_state(state: dict) -> None:
     """
@@ -45,11 +51,29 @@ def write_dashboard_state(state: dict) -> None:
 
     Uses compact JSON (no indentation) for faster serialization and smaller file size.
     The dashboard parses JSON programmatically, so human readability is not needed.
+    Atomic replace avoids torn reads; optional coalescing reduces disk churn.
     """
+    global _dashboard_last_write_mono, _dashboard_last_payload
     path = Path(__file__).parent / "dashboard_state.json"
     try:
-        # Use compact JSON (no indent) for faster serialization
-        path.write_text(json.dumps(state), encoding="utf-8")
+        payload = json.dumps(state, separators=(",", ":"))
+        if config.DASHBOARD_MIN_WRITE_SECONDS > 0:
+            now_mono = time.monotonic()
+            if (
+                _dashboard_last_payload == payload
+                and (now_mono - _dashboard_last_write_mono) < config.DASHBOARD_MIN_WRITE_SECONDS
+            ):
+                return
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        if config.DASHBOARD_MIN_WRITE_SECONDS > 0:
+            _dashboard_last_write_mono = time.monotonic()
+            _dashboard_last_payload = payload
     except Exception as e:
         log.debug("Failed to write dashboard_state.json: %s", e)
 
@@ -163,16 +187,34 @@ signal.signal(signal.SIGTERM, _handle_signal)
 
 # ── CLI execution wrappers ────────────────────────────────────────────────────────────────────
 
-def _cli_buy(ticker, side, count, price_cents, dry_run=False):
-    """Execute a buy order through the CLI with decision-engine retry/escalation."""
+def _cli_buy(client: KalshiClient, ticker, side, count, price_cents, dry_run=False):
+    """Execute a buy via in-process envelope or CLI subprocess + decision engine."""
+    if config.INPROCESS_KALSHI_ORDERS:
+        from kalshi_inprocess_orders import buy_envelope
+
+        def _fn():
+            return buy_envelope(
+                client, ticker, side, count, price_cents, dry_run=dry_run,
+            )
+
+        return cli_executor.execute_with_decision_engine([], envelope_fn=_fn)
     args = ["buy", "--ticker", ticker, side, str(count), str(price_cents)]
     if dry_run:
         args.append("--dry-run")
     return cli_executor.execute_with_decision_engine(args)
 
 
-def _cli_sell(ticker, side, count, price_cents, dry_run=False):
-    """Execute a sell order through the CLI with decision-engine retry/escalation."""
+def _cli_sell(client: KalshiClient, ticker, side, count, price_cents, dry_run=False):
+    """Execute a sell via in-process envelope or CLI subprocess + decision engine."""
+    if config.INPROCESS_KALSHI_ORDERS:
+        from kalshi_inprocess_orders import sell_envelope
+
+        def _fn():
+            return sell_envelope(
+                client, ticker, side, count, price_cents, dry_run=dry_run,
+            )
+
+        return cli_executor.execute_with_decision_engine([], envelope_fn=_fn)
     args = ["sell", "--ticker", ticker, side, str(count), str(price_cents)]
     if dry_run:
         args.append("--dry-run")
@@ -256,7 +298,7 @@ def manage_positions(client: KalshiClient, market: dict, risk: RiskManager, curr
             ticker, side, entry_price, exit_price, pnl_cents, exit_reason,
         )
         outcome, _env = _cli_sell(
-            ticker, side, count, exit_price, dry_run=config.DRY_RUN,
+            client, ticker, side, count, exit_price, dry_run=config.DRY_RUN,
         )
         if outcome.action == AgentAction.HALT_TRADING:
             _halt_trading = True
@@ -478,7 +520,7 @@ def run_once(client: KalshiClient, risk: RiskManager, ws_client=None):
 
 def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, state: dict = None):
     """Internal implementation of one bot cycle. Updates *state* in-place for the dashboard."""
-    global _last_trade_window_id, _halt_trading
+    global _last_trade_window_id, _halt_trading, _cfb_last_full_monotonic
 
     # 1. Find the active market
     market = client.get_active_btc_market()
@@ -501,7 +543,23 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
     # The rolling buffer accumulates spot samples to approximate Kalshi's
     # settlement reference (simple average of the last 60 seconds of BRTI).
     # Agent context is enriched when ok=True; degraded fields are set on failure.
-    _cfb_snapshot = build_synthetic_cfb_snapshot(config.FIRECRAWL_API_KEY, buffer=_cfb_buffer)
+    now_mono = time.monotonic()
+    skip_firecrawl = False
+    if config.CFB_MIN_INTERVAL_SECONDS > 0 and _cfb_last_full_monotonic is not None:
+        if (now_mono - _cfb_last_full_monotonic) < config.CFB_MIN_INTERVAL_SECONDS:
+            skip_firecrawl = True
+    if not skip_firecrawl:
+        _cfb_last_full_monotonic = now_mono
+    if skip_firecrawl:
+        log.debug(
+            "SyntheticCFB: API-only refresh (full scrape throttled, interval=%ss)",
+            config.CFB_MIN_INTERVAL_SECONDS,
+        )
+    _cfb_snapshot = build_synthetic_cfb_snapshot(
+        config.FIRECRAWL_API_KEY,
+        buffer=_cfb_buffer,
+        skip_firecrawl=skip_firecrawl,
+    )
     if _cfb_snapshot.ok:
         _cfb_ctx: dict = {
             "synthetic_cfb_spot": _cfb_snapshot.synthetic_cfb_spot,
@@ -569,8 +627,11 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
             if ws_client and ws_client.is_connected():
                 log.debug("WebSocket orderbook not available, using REST for %s", ticker)
 
-        balance = client.get_balance()
-        positions = client.get_positions()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_bal = pool.submit(client.get_balance)
+            fut_pos = pool.submit(client.get_positions)
+            balance = fut_bal.result()
+            positions = fut_pos.result()
     except Exception as exc:
         log.error("API fetch error: %s", exc)
         risk._clear_datetime_cache()
@@ -735,7 +796,7 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
 
     # 7. Execute via CLI + decision engine
     outcome, envelope = _cli_buy(
-        ticker, sig.side, contracts, sig.price_cents, dry_run=config.DRY_RUN,
+        client, ticker, sig.side, contracts, sig.price_cents, dry_run=config.DRY_RUN,
     )
     if outcome.action == AgentAction.HALT_TRADING:
         _halt_trading = True
@@ -876,7 +937,7 @@ def _run_once_time_delay(
             ticker, side, entry_price, exit_price_order, pnl_cents,
         )
         outcome, _env = _cli_sell(
-            ticker, side, count, exit_price_order, dry_run=config.DRY_RUN,
+            client, ticker, side, count, exit_price_order, dry_run=config.DRY_RUN,
         )
         if outcome.action == AgentAction.HALT_TRADING:
             _halt_trading = True
@@ -936,7 +997,7 @@ def _run_once_time_delay(
     )
 
     outcome, envelope = _cli_buy(
-        ticker, side, contracts, sig_stub.price_cents, dry_run=config.DRY_RUN,
+        client, ticker, side, contracts, sig_stub.price_cents, dry_run=config.DRY_RUN,
     )
     if outcome.action == AgentAction.HALT_TRADING:
         _halt_trading = True
@@ -977,6 +1038,8 @@ def main():
     log.info(" Max Daily Loss : %sc", config.MAX_DAILY_LOSS_CENTS)
     log.info(" Max Daily Trades: %s", config.MAX_DAILY_TRADES)
     log.info(" Use WebSocket: %s", config.USE_WEBSOCKET_ORDERBOOK)
+    log.info(" CFB scrape interval: %ss (0=always full)", config.CFB_MIN_INTERVAL_SECONDS)
+    log.info(" In-process orders: %s", config.INPROCESS_KALSHI_ORDERS)
     log.info("=" * 60)
     if config.KALSHI_ENV == "prod" and not config.DRY_RUN:
         log.warning("!" * 60)

@@ -364,6 +364,28 @@ class TestBuildSyntheticCfbSnapshot(unittest.TestCase):
         self.assertIsNotNone(snap.error)
         self.assertIn("FIRECRAWL", snap.error or "")
 
+    def test_skip_firecrawl_uses_api_only_no_firecrawl_key(self):
+        def _mock_api(source_name, source_url, json_path):
+            return PriceObservation(
+                source_name=source_name,
+                source_url=source_url,
+                price_usd=65000.0,
+                scraped_at="t",
+                ok=True,
+                error=None,
+                raw_excerpt=None,
+            )
+
+        with patch("synthetic_cfb_price.scrape_price_source") as mock_scrape:
+            with patch(
+                "synthetic_cfb_price.fetch_price_api",
+                side_effect=_mock_api,
+            ):
+                snap = build_synthetic_cfb_snapshot("", skip_firecrawl=True)
+        mock_scrape.assert_not_called()
+        self.assertTrue(snap.ok)
+        self.assertAlmostEqual(snap.synthetic_cfb_spot or 0, 65000.0)
+
 
 # ---------------------------------------------------------------------------
 # Immature window confidence cap
