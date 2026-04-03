@@ -167,7 +167,19 @@ def execute_with_decision_engine(
 
     while True:
         if envelope_fn is not None:
-            envelope = envelope_fn()
+            try:
+                envelope = envelope_fn()
+            except Exception as exc:
+                log.exception("envelope_fn() failed during execute_with_decision_engine")
+                envelope = {
+                    "ok": False,
+                    "status": "error",
+                    "code": "ENVELOPE_FN_EXCEPTION",
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                }
         else:
             envelope = execute_cli(args, timeout=timeout)
         outcome = interpret_cli_response(
