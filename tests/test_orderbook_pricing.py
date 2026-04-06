@@ -6,6 +6,7 @@ from the orderbook structure and that strategy functions work with both
 old and new field names.
 """
 import unittest
+import logging
 from unittest.mock import MagicMock, patch
 
 from kalshi_client import KalshiClient
@@ -698,6 +699,44 @@ class TestQuotesFromOrderbookAscending(unittest.TestCase):
         self.assertEqual(quotes["best_yes_bid_size"], 7)
         self.assertEqual(quotes["best_no_bid"], 45)
         self.assertEqual(quotes["best_no_bid_size"], 6)
+
+
+class _RaisingHandler(logging.Handler):
+    def emit(self, record):
+        # Force message formatting; raises if %-format placeholders mismatch args.
+        record.getMessage()
+
+
+class TestBotLoggingDoesNotCrashOnNone(unittest.TestCase):
+    def test_active_market_log_safe_with_none_orderbook_side(self):
+        from bot import _quotes_from_orderbook
+        from kalshi_money import fmt_cents
+
+        # NO side empty → best_no_bid=None; this must not crash logging formatting.
+        orderbook = {"orderbook": {"yes": [[60, 10]], "no": []}}
+        quotes = _quotes_from_orderbook(orderbook)
+
+        self.assertIsNone(quotes["best_no_bid"])
+
+        logger = logging.getLogger("bot")
+        handler = _RaisingHandler()
+        logger.addHandler(handler)
+        old_level = logger.level
+        logger.setLevel(logging.INFO)
+        try:
+            logger.info(
+                "Active market: %s | last=%sc yes=%sc/%sc no=%sc/%sc mid=%sc (from orderbook)",
+                "TEST-TICKER",
+                fmt_cents(100),
+                fmt_cents(quotes.get("best_yes_bid")),
+                fmt_cents(quotes.get("best_yes_ask")),
+                fmt_cents(quotes.get("best_no_bid")),
+                fmt_cents(quotes.get("best_no_ask")),
+                fmt_cents(quotes.get("mid_price")),
+            )
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
 
 
 if __name__ == "__main__":

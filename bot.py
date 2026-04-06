@@ -39,6 +39,7 @@ from synthetic_cfb_price import (
     build_synthetic_cfb_snapshot,
     RollingSyntheticCfbBuffer,
 )
+from kalshi_money import fmt_cents
 
 _dashboard_last_write_mono: float = 0.0
 _dashboard_last_payload: str | None = None
@@ -475,14 +476,20 @@ def _quotes_from_orderbook(orderbook: dict) -> dict:
         if result["best_yes_bid"] is not None and result["best_yes_ask"] is None:
             # No NO bids, infer YES ask with minimal spread
             result["best_yes_ask"] = min(result["best_yes_bid"] + 1, 99)
-            log.debug("Inferred best_yes_ask=%d from best_yes_bid=%d (one-sided book)",
-                     result["best_yes_ask"], result["best_yes_bid"])
+            log.debug(
+                "Inferred best_yes_ask=%s from best_yes_bid=%s (one-sided book)",
+                fmt_cents(result["best_yes_ask"]),
+                fmt_cents(result["best_yes_bid"]),
+            )
 
         if result["best_no_bid"] is not None and result["best_no_ask"] is None:
             # No YES bids, infer NO ask with minimal spread
             result["best_no_ask"] = min(result["best_no_bid"] + 1, 99)
-            log.debug("Inferred best_no_ask=%d from best_no_bid=%d (one-sided book)",
-                     result["best_no_ask"], result["best_no_bid"])
+            log.debug(
+                "Inferred best_no_ask=%s from best_no_bid=%s (one-sided book)",
+                fmt_cents(result["best_no_ask"]),
+                fmt_cents(result["best_no_bid"]),
+            )
 
         # Compute mid price if we have at least one complete bid/ask pair
         if result["best_yes_bid"] is not None and result["best_yes_ask"] is not None:
@@ -677,9 +684,16 @@ def _run_once_impl(client: KalshiClient, risk: RiskManager, ws_client=None, stat
         # Check if orderbook is truly empty (both YES and NO sides have no quotes)
         # With one-sided inference, we should have at least bid OR ask on YES side
         if yes_bid is not None and yes_ask is not None:
-            log.info("Active market: %s | last=%sc yes=%dc/%dc no=%dc/%dc mid=%dc (from orderbook)",
-                     ticker, market.get("last_price"),
-                     yes_bid, yes_ask, no_bid, no_ask, mid)
+            log.info(
+                "Active market: %s | last=%sc yes=%sc/%sc no=%sc/%sc mid=%sc (from orderbook)",
+                ticker,
+                fmt_cents(market.get("last_price")),
+                fmt_cents(yes_bid),
+                fmt_cents(yes_ask),
+                fmt_cents(no_bid),
+                fmt_cents(no_ask),
+                fmt_cents(mid),
+            )
         else:
             yes_raw, no_raw = _extract_raw_arrays(orderbook)
 
