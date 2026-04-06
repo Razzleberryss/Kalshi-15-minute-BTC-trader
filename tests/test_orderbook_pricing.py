@@ -709,11 +709,14 @@ class _RaisingHandler(logging.Handler):
 
 class TestBotLoggingDoesNotCrashOnNone(unittest.TestCase):
     def test_active_market_log_safe_with_none_orderbook_side(self):
-        from bot import _quotes_from_orderbook, fmt_cents
+        from bot import _quotes_from_orderbook
+        from kalshi_money import fmt_cents
 
         # NO side empty → best_no_bid=None; this must not crash logging formatting.
         orderbook = {"orderbook": {"yes": [[60, 10]], "no": []}}
         quotes = _quotes_from_orderbook(orderbook)
+
+        self.assertIsNone(quotes["best_no_bid"])
 
         logger = logging.getLogger("bot")
         handler = _RaisingHandler()

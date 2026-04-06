@@ -27,13 +27,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 import config
-from kalshi_money import enrich_market_quotes_from_dollar_fields
+from kalshi_money import enrich_market_quotes_from_dollar_fields, fmt_cents
 
 log = logging.getLogger(__name__)
-
-# Keep logging robust when pricing fields may be None.
-def fmt_cents(v: int | None) -> str:
-    return "NA" if v is None else str(v)
 
 # Order create responses: Kalshi removed "pending" from the public status enum.
 _ORDER_CREATE_OK_STATUSES = frozenset(

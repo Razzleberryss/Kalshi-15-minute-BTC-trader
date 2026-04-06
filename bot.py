@@ -39,6 +39,7 @@ from synthetic_cfb_price import (
     build_synthetic_cfb_snapshot,
     RollingSyntheticCfbBuffer,
 )
+from kalshi_money import fmt_cents
 
 _dashboard_last_write_mono: float = 0.0
 _dashboard_last_payload: str | None = None
@@ -160,9 +161,6 @@ def setup_logging():
     root.addHandler(handler)
 
 log = logging.getLogger("bot")
-
-def fmt_cents(v: int | None) -> str:
-    return "NA" if v is None else str(v)
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────────────────────────
 _running = True
