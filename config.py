@@ -86,6 +86,10 @@ MAX_TRADES_PER_WINDOW: int = int(os.getenv("MAX_TRADES_PER_WINDOW", "1"))
 BTC_SERIES_TICKER: str = os.getenv("BTC_SERIES_TICKER", "KXBTC15M")
 BTC_TICKER: str = os.getenv("BTC_TICKER", "BTC-USD")  # yfinance symbol
 MOMENTUM_LOOKBACK_BARS: int = int(os.getenv("MOMENTUM_LOOKBACK_BARS", "5"))
+# Period passed to yfinance when fetching BTC 1-minute bars for momentum.
+# Default of "60m" keeps downloads small (~60 bars) while covering the lookback.
+# Increase (e.g. "1d") only in environments where recent bars are frequently missing.
+BTC_MOMENTUM_HISTORY_PERIOD: str = os.getenv("BTC_MOMENTUM_HISTORY_PERIOD", "60m")
 
 # USE_ORDERBOOK_PRICES: When True, fetch quotes from the orderbook instead of
 # the /markets API response. Defaults to True (new behavior). Set

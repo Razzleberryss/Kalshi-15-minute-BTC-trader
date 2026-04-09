@@ -68,10 +68,11 @@ def get_btc_momentum() -> Optional[float]:
 
     try:
         ticker = yf.Ticker(config.BTC_TICKER)
-        # Request only the last 30 minutes of 1-min bars (6x the lookback period)
-        # to minimize data transfer while ensuring we have enough bars even if some
-        # are missing. This reduces download size from 1440 bars (1 day) to ~30 bars.
-        hist = ticker.history(period="1d", interval="1m")
+        # Use a small intraday lookback by default to keep yfinance downloads cheap
+        # in the bot hot path. Allow overriding via config when a larger buffer is
+        # explicitly needed for environments with sparse/missing recent 1-minute bars.
+        history_period = config.BTC_MOMENTUM_HISTORY_PERIOD
+        hist = ticker.history(period=history_period, interval="1m")
         if hist.empty or len(hist) < config.MOMENTUM_LOOKBACK_BARS + 1:
             log.warning("Not enough BTC price history available")
             return None
