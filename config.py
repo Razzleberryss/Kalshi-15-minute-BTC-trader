@@ -86,6 +86,10 @@ MAX_TRADES_PER_WINDOW: int = int(os.getenv("MAX_TRADES_PER_WINDOW", "1"))
 BTC_SERIES_TICKER: str = os.getenv("BTC_SERIES_TICKER", "KXBTC15M")
 BTC_TICKER: str = os.getenv("BTC_TICKER", "BTC-USD")  # yfinance symbol
 MOMENTUM_LOOKBACK_BARS: int = int(os.getenv("MOMENTUM_LOOKBACK_BARS", "5"))
+# Period passed to yfinance when fetching BTC 1-minute bars for momentum.
+# Default of "60m" keeps downloads small (~60 bars) while covering the lookback.
+# Increase (e.g. "1d") only in environments where recent bars are frequently missing.
+BTC_MOMENTUM_HISTORY_PERIOD: str = os.getenv("BTC_MOMENTUM_HISTORY_PERIOD", "60m")
 
 # USE_ORDERBOOK_PRICES: When True, fetch quotes from the orderbook instead of
 # the /markets API response. Defaults to True (new behavior). Set
@@ -179,20 +183,6 @@ LOOP_INTERVAL_SECONDS: int = POLL_INTERVAL_SECONDS  # alias used in bot.py
 EXPIRY_EXIT_SECONDS: int = int(os.getenv("EXPIRY_EXIT_SECONDS", "120"))
 
 # =============================================================================
-# Firecrawl – Synthetic CF Benchmarks BTC price estimator
-# =============================================================================
-# API key for the Firecrawl web-scraping service.  When empty the synthetic
-# CFB snapshot is skipped gracefully each cycle (ok=False, degraded context).
-FIRECRAWL_API_KEY: str = os.getenv("FIRECRAWL_API_KEY", "")
-
-# Minimum seconds between full Firecrawl+API synthetic CFB fetches. Between
-# full runs, only public JSON API sources are used (faster, no Firecrawl).
-# Set to 0 to always run the full scrape path when a Firecrawl key is set.
-# Raised from 25 s to 60 s: the full Firecrawl scrape (6-11 concurrent
-# network calls) can block the bot for several seconds; doing it at most once
-# per minute keeps cycle latency low while still refreshing CFB context.
-CFB_MIN_INTERVAL_SECONDS: float = float(os.getenv("CFB_MIN_INTERVAL_SECONDS", "60"))
-
 # When True, bot buy/sell uses kalshi_inprocess_orders (same envelopes as CLI)
 # instead of spawning openclaw_kalshi.py per order.
 INPROCESS_KALSHI_ORDERS: bool = os.getenv("INPROCESS_KALSHI_ORDERS", "true").lower() == "true"
@@ -270,8 +260,6 @@ def validate() -> None:
         errors.append("REQUEST_TIMEOUT_SECONDS must be >= 1")
     if REQUEST_MAX_RETRIES < 0:
         errors.append("REQUEST_MAX_RETRIES must be >= 0")
-    if CFB_MIN_INTERVAL_SECONDS < 0:
-        errors.append("CFB_MIN_INTERVAL_SECONDS must be >= 0")
     if DASHBOARD_MIN_WRITE_SECONDS < 0:
         errors.append("DASHBOARD_MIN_WRITE_SECONDS must be >= 0")
     if EXPIRY_EXIT_SECONDS < 0:

@@ -24,6 +24,3 @@ websocket-client>=1.6.0
 
 # Local web dashboard for monitoring the bot
 flask>=3.0.0
-
-# Firecrawl: web scraping client for synthetic CF Benchmarks BTC price estimation
-firecrawl-py>=1.13.5
