@@ -11,7 +11,7 @@ python-dotenv>=1.0.0
 # BTC spot price data (yfinance for real-time 1-min candles)
 yfinance>=0.2.54
 # RSA-PSS signing for Kalshi API authentication
-cryptography>=41.0.0
+cryptography>=46.0.7
 
 # Numeric utilities (signal calculation)
 numpy>=1.26.0
