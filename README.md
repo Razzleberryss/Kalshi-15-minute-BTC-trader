@@ -1,4 +1,4 @@
-# Kalshi 15-Minute BTC Trader
+# AstroTick
 
 A rule-based Python trading bot for Kalshi's BTC Up/Down 15-minute prediction markets. Trades using the official Kalshi REST API v2 with RSA-PSS authentication. Now integrates with **OpenClaw Agent Trading** for autonomous, AI-driven signal enrichment and trade execution.
 
@@ -62,8 +62,8 @@ This project is fully optimized for development inside **Cursor** with AI-assist
 ### 1. Clone and set up environment
 
 ```bash
-git clone https://github.com/Razzleberryss/Kalshi-15-minute-BTC-trader.git
-cd Kalshi-15-minute-BTC-trader
+git clone https://github.com/Razzleberryss/AstroTick.git
+cd AstroTick
 python3 -m venv venv
 source venv/bin/activate          # Mac/Linux
 # venv\Scripts\activate           # Windows
