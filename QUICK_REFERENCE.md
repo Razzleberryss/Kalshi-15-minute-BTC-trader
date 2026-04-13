@@ -21,12 +21,7 @@ This document provides a quick reference for the performance improvements implem
    - **Impact**: 50-80% faster skew calculation with negligible accuracy loss
    - **Effort**: 30 minutes
 
-4. **Reduced memory usage** (`synthetic_cfb_price.py`)
-   - Only store excerpts in DEBUG mode, reduced from 1000 to 200 chars
-   - **Impact**: 80-95% memory reduction for price observations
-   - **Effort**: 15 minutes
-
-5. **Performance monitoring utilities** (`performance.py`)
+4. **Performance monitoring utilities** (`performance.py`)
    - Added decorators and metrics tracking for identifying bottlenecks
    - **Impact**: Better observability, easier performance debugging
    - **Effort**: 2 hours
@@ -126,56 +121,6 @@ skew = get_orderbook_skew(orderbook, max_levels=20)
 ## Critical Improvements Still Needed
 
 The following high-impact optimizations require more substantial changes and should be prioritized:
-
-### 1. Background Thread for CFB Price Scraping (CRITICAL)
-
-**Problem**: `build_synthetic_cfb_snapshot` blocks trading loop for 5-25 seconds
-
-**Solution**: Move to background thread with cached results
-
-```python
-# Recommended implementation pattern
-import threading
-from concurrent.futures import ThreadPoolExecutor
-
-class CachedCfbScraper:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self._cache = None
-        self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=1)
-
-    def start_background_refresh(self):
-        """Start background thread that refreshes every 10 seconds"""
-        def _refresh_loop():
-            while True:
-                self._refresh_cache()
-                time.sleep(10)
-
-        thread = threading.Thread(target=_refresh_loop, daemon=True)
-        thread.start()
-
-    def _refresh_cache(self):
-        """Background refresh - never blocks trading loop"""
-        try:
-            snapshot = build_synthetic_cfb_snapshot(self.api_key, ...)
-            with self._lock:
-                self._cache = snapshot
-        except Exception as e:
-            log.error(f"Background CFB refresh failed: {e}")
-
-    def get_snapshot(self) -> Optional[SyntheticCfbSnapshot]:
-        """Non-blocking: returns cached value"""
-        with self._lock:
-            return self._cache
-
-# Usage in bot.py
-scraper = CachedCfbScraper(config.FIRECRAWL_API_KEY)
-scraper.start_background_refresh()
-
-# Later in trading loop (non-blocking!)
-snapshot = scraper.get_snapshot()
-```
 
 ### 2. Parallel Orderbook Fetching
 
