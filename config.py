@@ -35,7 +35,7 @@ KALSHI_BASE_URL = BASE_URL  # alias used in kalshi_client.py
 # Risk Controls
 # =============================================================================
 MAX_TRADE_DOLLARS: float = float(os.getenv("MAX_TRADE_DOLLARS", "10"))
-MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "32"))
+MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
 MAX_TOTAL_EXPOSURE: float = float(os.getenv("MAX_TOTAL_EXPOSURE", "50"))
 MAX_DAILY_LOSS_CENTS: int = int(os.getenv("MAX_DAILY_LOSS_CENTS", "1000"))
 MAX_DAILY_TRADES: int = int(os.getenv("MAX_DAILY_TRADES", "20"))

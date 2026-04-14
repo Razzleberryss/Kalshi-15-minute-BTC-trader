@@ -1,5 +1,13 @@
 import unittest
+import os
+import tempfile
 from unittest.mock import MagicMock, patch
+
+os.environ.setdefault("ASTROTICK_SKIP_DOTENV", "1")
+os.environ.setdefault(
+    "OPENCLAW_STOP_FILE",
+    os.path.join(tempfile.gettempdir(), f"openclaw_stop_file_tests_{os.getpid()}"),
+)
 
 import config
 
@@ -103,4 +111,3 @@ class TestSdkCallPaths(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

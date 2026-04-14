@@ -134,11 +134,16 @@ from kalshi_agent_envelope import (  # noqa: E402
 )
 
 
+def _stop_file() -> Path:
+    return Path(os.environ.get("OPENCLAW_STOP_FILE", str(STOP_FILE)))
+
+
 def _check_stop_file():
-    if STOP_FILE.exists():
+    stop_file = _stop_file()
+    if stop_file.exists():
         _die(
             "STOP_TRADING",
-            f"STOP_TRADING file exists at {STOP_FILE}. Remove it to resume trading.",
+            f"STOP_TRADING file exists at {stop_file}. Remove it to resume trading.",
         )
 
 
@@ -373,7 +378,7 @@ def cmd_status(client: KalshiClient, args):
         "total_positions": len([p for p in positions if p.get("position", 0) != 0]),
         "live_trading": os.environ.get("KALSHI_TRADING_LIVE") == "1",
         "dry_run_config": config.DRY_RUN,
-        "stop_file_present": STOP_FILE.exists(),
+        "stop_file_present": _stop_file().exists(),
     }
     _out(_success("STATUS_OK", result), args.human)
 

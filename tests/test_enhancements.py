@@ -17,7 +17,10 @@ from pathlib import Path
 
 import requests
 
-os.environ.setdefault("OPENCLAW_STOP_FILE", f"/tmp/openclaw_stop_file_tests_{os.getpid()}")
+os.environ.setdefault(
+    "OPENCLAW_STOP_FILE",
+    str(Path(tempfile.gettempdir()) / f"openclaw_stop_file_tests_{os.getpid()}"),
+)
 os.environ.setdefault("ASTROTICK_SKIP_DOTENV", "1")
 os.environ.setdefault("DRY_RUN", "true")
 os.environ.setdefault("KALSHI_TRADING_LIVE", "1")

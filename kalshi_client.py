@@ -19,7 +19,7 @@ import random
 import time
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Optional
 
@@ -191,13 +191,12 @@ class KalshiClient:
                 log.warning("Kalshi SDK init failed (using noop SDK): %s", sdk_exc)
                 self._sdk = _NoopSdk()
 
-            masked_key_id = (self.api_key_id or "")
-            masked_key_id = (masked_key_id[:6] + "***") if masked_key_id else "MISSING"
+            key_id_status = "SET" if self.api_key_id else "MISSING"
             log.debug(
                 "Kalshi SDK client initialized (env=%s host=%s key_id=%s)",
                 config.KALSHI_ENV,
                 self.base_url,
-                masked_key_id,
+                key_id_status,
             )
         except Exception as exc:
             log.error("Failed to initialize Kalshi SDK client: %s", exc, exc_info=True)
@@ -405,10 +404,26 @@ class KalshiClient:
 
     # ── Public API methods ────────────────────────────────────────────────────────────────────────
     # New SDK-style public methods (limit-based), plus compatibility shims.
-    def get_fills(self, limit: int = 100) -> list[dict]:
-        """Return recent fills (portfolio) as a list of dicts."""
+    def get_fills(self, *args: Any, limit: Optional[int] = None) -> list[dict]:
+        """Return recent fills, or support legacy get_fills(start_ts, end_ts)."""
         try:
-            raw = self._sdk.get_fills(limit=int(limit))
+            if len(args) == 2:
+                start_ts, end_ts = args
+                if not (
+                    isinstance(start_ts, datetime.datetime)
+                    and isinstance(end_ts, datetime.datetime)
+                ):
+                    raise TypeError(
+                        "get_fills(start_ts, end_ts) requires datetime arguments"
+                    )
+                return self.get_fills_in_range(start_ts, end_ts)
+            if len(args) > 1:
+                raise TypeError(
+                    "get_fills accepts either (limit) or (start_ts, end_ts)"
+                )
+
+            effective_limit = limit if limit is not None else (args[0] if args else 100)
+            raw = self._sdk.get_fills(limit=int(effective_limit))
             data = _to_dict(raw)
             return data.get("fills", []) or []
         except Exception as exc:
