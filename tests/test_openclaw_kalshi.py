@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -31,8 +32,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("BTC_SERIES_TICKER", "KXBTCD")
 os.environ.setdefault("KALSHI_API_KEY_ID", "test-key")
 os.environ.setdefault("KALSHI_PRIVATE_KEY_PATH", __file__)
+os.environ.setdefault("ASTROTICK_SKIP_DOTENV", "1")
+os.environ.setdefault(
+    "OPENCLAW_STOP_FILE",
+    os.path.join(tempfile.gettempdir(), f"openclaw_stop_file_tests_{os.getpid()}"),
+)
 
 import openclaw_kalshi as cli
+
+_STOP_PATH = os.environ["OPENCLAW_STOP_FILE"]
+try:
+    os.remove(_STOP_PATH)
+except FileNotFoundError:
+    pass
 
 # ── Envelope invariant assertions ──────────────────────────────────────────────
 

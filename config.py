@@ -11,7 +11,9 @@ from typing import Optional
 from dotenv import load_dotenv
 
 # -- Load .env file from project root ----------------------------------------
-load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+# Unit tests frequently need a clean environment; allow skipping dotenv load.
+if os.getenv("ASTROTICK_SKIP_DOTENV", "0") != "1":
+    load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 # =============================================================================
 # Kalshi API

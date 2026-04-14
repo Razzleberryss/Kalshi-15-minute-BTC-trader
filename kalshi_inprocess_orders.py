@@ -19,7 +19,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-STOP_FILE = Path.home() / ".openclaw" / "workspace" / "STOP_TRADING"
+# Allow tests / sandboxes to override the STOP_TRADING location.
+STOP_FILE = Path(os.environ.get("OPENCLAW_STOP_FILE", str(Path.home() / ".openclaw" / "workspace" / "STOP_TRADING")))
+
+
+def _stop_file() -> Path:
+    # Re-read env at call time so tests can set OPENCLAW_STOP_FILE even if this
+    # module was imported earlier.
+    return Path(os.environ.get("OPENCLAW_STOP_FILE", str(STOP_FILE)))
 
 
 def buy_envelope(
@@ -32,10 +39,10 @@ def buy_envelope(
     dry_run: bool,
 ) -> dict:
     """Mirror openclaw_kalshi.cmd_buy validation and API calls; return envelope dict."""
-    if STOP_FILE.exists():
+    if _stop_file().exists():
         return failure_envelope(
             "STOP_TRADING",
-            f"STOP_TRADING file exists at {STOP_FILE}. Remove it to resume trading.",
+            f"STOP_TRADING file exists at {_stop_file()}. Remove it to resume trading.",
         )
 
     if not dry_run and os.environ.get("KALSHI_TRADING_LIVE") != "1":
@@ -115,10 +122,10 @@ def sell_envelope(
     dry_run: bool,
 ) -> dict:
     """Mirror openclaw_kalshi.cmd_sell validation and API calls; return envelope dict."""
-    if STOP_FILE.exists():
+    if _stop_file().exists():
         return failure_envelope(
             "STOP_TRADING",
-            f"STOP_TRADING file exists at {STOP_FILE}. Remove it to resume trading.",
+            f"STOP_TRADING file exists at {_stop_file()}. Remove it to resume trading.",
         )
 
     if not dry_run and os.environ.get("KALSHI_TRADING_LIVE") != "1":

@@ -13,8 +13,17 @@ import os
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch, call
+from pathlib import Path
 
 import requests
+
+os.environ.setdefault(
+    "OPENCLAW_STOP_FILE",
+    str(Path(tempfile.gettempdir()) / f"openclaw_stop_file_tests_{os.getpid()}"),
+)
+os.environ.setdefault("ASTROTICK_SKIP_DOTENV", "1")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("KALSHI_TRADING_LIVE", "1")
 
 import config
 from bot import manage_positions
@@ -38,6 +47,7 @@ def _future_close_time(seconds: int = 3600) -> str:
 def _make_mock_client():
     client = MagicMock(spec=KalshiClient)
     client.close_position.return_value = None
+    client.contracts_held_on_side.return_value = 999
     return client
 
 
@@ -364,6 +374,12 @@ class TestStrategyHelpers(unittest.TestCase):
 class TestManagePositionsMissingData(unittest.TestCase):
 
     def setUp(self):
+        import bot as _bot
+        _bot._halt_trading = False
+        try:
+            Path(os.environ.get("OPENCLAW_STOP_FILE", "")).unlink(missing_ok=True)
+        except Exception:
+            pass
         self._orig_trade_log = config.TRADE_LOG_FILE
         self._orig_stop_loss = config.STOP_LOSS_CENTS
         self._orig_take_profit = config.TAKE_PROFIT_CENTS

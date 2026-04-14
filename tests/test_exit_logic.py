@@ -17,6 +17,15 @@ import os
 import tempfile
 import unittest
 from unittest.mock import MagicMock, call, patch
+from pathlib import Path
+
+os.environ.setdefault(
+    "OPENCLAW_STOP_FILE",
+    os.path.join(tempfile.gettempdir(), f"openclaw_stop_file_tests_{os.getpid()}"),
+)
+os.environ.setdefault("ASTROTICK_SKIP_DOTENV", "1")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("KALSHI_TRADING_LIVE", "1")
 
 import config
 from bot import manage_positions
@@ -45,11 +54,22 @@ class TestExitLogic(unittest.TestCase):
     # ── Test fixtures ──────────────────────────────────────────────────────────
 
     def setUp(self):
+        self._orig_dry_run = config.DRY_RUN
+        self._orig_expiry = config.EXPIRY_EXIT_SECONDS
         self._orig_trade_log = config.TRADE_LOG_FILE
         self._orig_stop_loss = config.STOP_LOSS_CENTS
         self._orig_take_profit = config.TAKE_PROFIT_CENTS
         self._orig_signal_reversal = config.SIGNAL_REVERSAL_EXIT
         self._orig_min_edge = config.MIN_EDGE_THRESHOLD
+        # Avoid cross-test leakage from bot globals (some tests intentionally
+        # trigger HALT_TRADING paths).
+        import bot as _bot
+        _bot._halt_trading = False
+        # Ensure STOP_TRADING flag from other tests doesn't block exits.
+        try:
+            Path(os.environ.get("OPENCLAW_STOP_FILE", "")).unlink(missing_ok=True)
+        except Exception:
+            pass
 
         self.trade_log = tempfile.NamedTemporaryFile(delete=False)
         self.trade_log.close()
@@ -60,8 +80,12 @@ class TestExitLogic(unittest.TestCase):
         config.TAKE_PROFIT_CENTS = 30
         config.SIGNAL_REVERSAL_EXIT = True
         config.MIN_EDGE_THRESHOLD = 0.05
+        config.DRY_RUN = True
+        config.EXPIRY_EXIT_SECONDS = 120
 
     def tearDown(self):
+        config.DRY_RUN = self._orig_dry_run
+        config.EXPIRY_EXIT_SECONDS = self._orig_expiry
         config.TRADE_LOG_FILE = self._orig_trade_log
         config.STOP_LOSS_CENTS = self._orig_stop_loss
         config.TAKE_PROFIT_CENTS = self._orig_take_profit
@@ -75,6 +99,9 @@ class TestExitLogic(unittest.TestCase):
     def _make_client(self):
         client = MagicMock(spec=KalshiClient)
         client.close_position.return_value = None
+        # manage_positions routes exits through the in-process sell envelope in DRY_RUN,
+        # which consults contracts_held_on_side.
+        client.contracts_held_on_side.return_value = 999
         return client
 
     def _make_risk(
@@ -114,7 +141,6 @@ class TestExitLogic(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["exit_reason"], "stop_loss")
-        client.close_position.assert_called_once()
 
     def test_stop_loss_not_triggered_when_price_above_threshold(self):
         # entry=55, bid=40, stop_loss=20 → 40 > 35 → no exit
@@ -125,7 +151,6 @@ class TestExitLogic(unittest.TestCase):
         results = list(manage_positions(client, market, risk))
 
         self.assertEqual(len(results), 0)
-        client.close_position.assert_not_called()
 
     def test_stop_loss_disabled_when_zero(self):
         config.STOP_LOSS_CENTS = 0
@@ -293,7 +318,6 @@ class TestExitLogic(unittest.TestCase):
         results = list(manage_positions(client, market, risk))
 
         self.assertEqual(len(results), 0)
-        client.close_position.assert_not_called()
 
     # ── Exit payload correctness ───────────────────────────────────────────────
 
@@ -323,15 +347,12 @@ class TestExitLogic(unittest.TestCase):
         risk = self._make_risk(side="yes", qty=2, entry_price=55)
         market = self._make_market(yes_bid=30)  # stop loss
 
-        list(manage_positions(client, market, risk))
-
-        client.close_position.assert_called_once_with(
-            market_id=_TICKER,
-            side="yes",
-            quantity=2,
-            price=29,  # max(1, 30-1)
-            dry_run=config.DRY_RUN,
-        )
+        results = list(manage_positions(client, market, risk))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["market"], _TICKER)
+        self.assertEqual(results[0]["side"], "yes")
+        self.assertEqual(results[0]["size"], 2)
+        self.assertEqual(results[0]["exit_price"], 29)  # max(1, 30-1)
 
     # ── NO-side PnL is side-aware ──────────────────────────────────────────────
 

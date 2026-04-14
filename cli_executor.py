@@ -16,6 +16,7 @@ and manual CLI invocations observe the same halt signal.
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -32,7 +33,18 @@ from agent_decision_engine import (
 log = logging.getLogger("cli_executor")
 
 CLI_SCRIPT = str(Path(__file__).parent / "openclaw_kalshi.py")
-STOP_TRADING_FILE = Path.home() / ".openclaw" / "workspace" / "STOP_TRADING"
+# Backward-compatible constant (tests may patch this), but prefer reading the
+# environment at call time so test modules can set OPENCLAW_STOP_FILE even if
+# cli_executor was imported earlier.
+_DEFAULT_STOP_TRADING_FILE = Path.home() / ".openclaw" / "workspace" / "STOP_TRADING"
+STOP_TRADING_FILE = _DEFAULT_STOP_TRADING_FILE
+
+
+def _stop_trading_path() -> Path:
+    # If tests patched STOP_TRADING_FILE, honor that over the environment.
+    if STOP_TRADING_FILE != _DEFAULT_STOP_TRADING_FILE:
+        return STOP_TRADING_FILE
+    return Path(os.environ.get("OPENCLAW_STOP_FILE", str(STOP_TRADING_FILE)))
 
 
 def execute_cli(args: list, timeout: int = 30) -> dict:
@@ -124,7 +136,8 @@ def write_stop_trading_file(outcome: DecisionOutcome) -> None:
     source of truth for the halt signal.
     """
     try:
-        STOP_TRADING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        path = _stop_trading_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
         context = {
             "action": outcome.action.value,
             "code": outcome.code,
@@ -135,10 +148,10 @@ def write_stop_trading_file(outcome: DecisionOutcome) -> None:
             context["escalation_code"] = outcome.escalation.code
             context["escalation_error"] = outcome.escalation.error
             context["escalation_warnings"] = outcome.escalation.warnings
-        STOP_TRADING_FILE.write_text(
+        path.write_text(
             json.dumps(context, indent=2), encoding="utf-8",
         )
-        log.critical("STOP_TRADING file written: %s", STOP_TRADING_FILE)
+        log.critical("STOP_TRADING file written: %s", path)
     except Exception as exc:
         log.error("Failed to write STOP_TRADING file: %s", exc)
 

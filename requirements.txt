@@ -24,3 +24,6 @@ websocket-client>=1.6.0
 
 # Local web dashboard for monitoring the bot
 flask>=3.0.0
+
+# Official Kalshi synchronous Python SDK (Trade API v2)
+kalshi-python-sync>=3.2.0,<4
