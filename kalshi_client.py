@@ -168,6 +168,7 @@ class KalshiClient:
             # Keep key material loading centralized here.
             try:
                 sdk_cfg.private_key_pem = _read_private_key_pem(config.KALSHI_PRIVATE_KEY_PATH)
+                log.debug("Private key loaded successfully [REDACTED]")
             except Exception as key_exc:
                 # Unit tests in this repo instantiate KalshiClient without a real
                 # key file; don't hard-fail in that scenario. bot.py calls
@@ -190,12 +191,13 @@ class KalshiClient:
                 log.warning("Kalshi SDK init failed (using noop SDK): %s", sdk_exc)
                 self._sdk = _NoopSdk()
 
-            log.info(
-                "Kalshi SDK client initialized (env=%s host=%s key_id=%s…%s)",
+            masked_key_id = (self.api_key_id or "")
+            masked_key_id = (masked_key_id[:6] + "***") if masked_key_id else "MISSING"
+            log.debug(
+                "Kalshi SDK client initialized (env=%s host=%s key_id=%s)",
                 config.KALSHI_ENV,
                 self.base_url,
-                (self.api_key_id or "")[:4],
-                (self.api_key_id or "")[-4:],
+                masked_key_id,
             )
         except Exception as exc:
             log.error("Failed to initialize Kalshi SDK client: %s", exc, exc_info=True)
